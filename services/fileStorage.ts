@@ -1,1033 +1,732 @@
+/**
+ * UPIC local vault.
+ *
+ * Everything sensitive (passwords, MFA history, temporary emails) is stored in
+ * one file per user, encrypted with AES-256-GCM under a random data key (DEK).
+ * The DEK only exists in memory while the vault is unlocked; on disk it is
+ * wrapped by:
+ *   - the master password (PBKDF2-derived key),
+ *   - the backup recovery key (shown once at setup),
+ *   - optionally a device-only escrow key kept in the Keychain/Keystore, which
+ *     enables "recover with email/phone on this device".
+ * Biometric unlock stores the DEK in the secure enclave behind a biometric check.
+ *
+ * Vault format v1 (pre-UPIC) is migrated automatically on first unlock.
+ */
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as FileSystem from 'expo-file-system/legacy';
-import { PasswordEntry, MFAApproval, EmailAlias, User } from '../types';
-import { hashPassword, encryptData, decryptData } from './encryption';
+import { files, secure } from './platformStorage';
+import * as C from './crypto';
+import { decryptData as legacyDecrypt } from './encryption';
+import type { EmailAlias, KdfParams, MFAApproval, MFAStatus, PasswordEntry, User } from '../types';
 
 const USER_KEY = '@current_user';
-const MASTER_PASSWORD_KEY = '@master_password';
-const BIOMETRIC_ENABLED_KEY = '@biometric_enabled';
-const ONBOARDING_COMPLETED_KEY = '@onboarding_completed';
-const THEME_KEY = '@app_theme';
+const REGISTRY_FILE = 'users_registry.json';
+const WALKTHROUGH_KEY = '@onboarding_completed';
 
-interface AppData {
-  users: User[];
+const vaultPath = (userId: string) => `users/${userId}/data.json`;
+const safeKey = (s: string) => s.replace(/[^a-zA-Z0-9._-]/g, '_');
+const escrowKeyName = (userId: string) => `upic_escrow_${safeKey(userId)}`;
+export const biometricKeyName = (userId: string) => `upic_bio_${safeKey(userId)}`;
+
+interface VaultData {
   passwords: PasswordEntry[];
   mfaApprovals: MFAApproval[];
   emailAliases: EmailAlias[];
+  knownDevices: string[];
 }
 
-// Get user-specific data directory
-function getUserDataDirectory(userId: string): string {
-  return `${FileSystem.documentDirectory}users/${userId}/`;
+interface VaultFile {
+  encrypted: true;
+  version: 2;
+  kdf: KdfParams;
+  keys: {
+    master: C.Box;
+    recovery?: C.Box & { salt: string; iterations: number };
+    device?: C.Box;
+  };
+  payload: C.Box;
+  updatedAt: string;
 }
 
-function getUserDataFile(userId: string): string {
-  return `${getUserDataDirectory(userId)}data.json`;
+export type VaultErrorCode =
+  | 'NO_USER'
+  | 'BAD_PASSWORD'
+  | 'LOCKED'
+  | 'NO_VAULT'
+  | 'BAD_RECOVERY_KEY'
+  | 'NO_DEVICE_RECOVERY'
+  | 'EXISTS';
+
+export class VaultError extends Error {
+  code: VaultErrorCode;
+  constructor(code: VaultErrorCode, message: string) {
+    super(message);
+    this.code = code;
+  }
 }
 
-// Global users registry (stored separately)
-const USERS_REGISTRY_FILE = `${FileSystem.documentDirectory}users_registry.json`;
+const emptyData = (): VaultData => ({ passwords: [], mfaApprovals: [], emailAliases: [], knownDevices: [] });
 
-let appData: AppData = {
-  users: [],
-  passwords: [],
-  mfaApprovals: [],
-  emailAliases: [],
-};
+let users: User[] = [];
+let session: { userId: string; dek: Uint8Array } | null = null;
+let header: VaultFile | null = null;
+let data: VaultData = emptyData();
+let writeChain: Promise<void> = Promise.resolve();
 
-/**
- * Initialize storage and ensure directories exist
- */
+/* ---------------- change notifications ---------------- */
+
+const listeners = new Set<() => void>();
+export function subscribeVault(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+function emit() {
+  listeners.forEach((l) => {
+    try {
+      l();
+    } catch {
+      // A broken listener must not break storage.
+    }
+  });
+}
+
+/* ---------------- users registry ---------------- */
+
 export async function initStorage(): Promise<void> {
   try {
-    // Ensure users directory exists
-    const usersDir = `${FileSystem.documentDirectory}users/`;
-    const dirInfo = await FileSystem.getInfoAsync(usersDir);
-    if (!dirInfo.exists) {
-      await FileSystem.makeDirectoryAsync(usersDir, { intermediates: true });
-    }
-
-    // Load users registry
-    await loadUsersRegistry();
-  } catch (error) {
-    console.error('Error initializing storage:', error);
+    const raw = await files.read(REGISTRY_FILE);
+    users = raw ? (JSON.parse(raw).users as User[]) ?? [] : [];
+  } catch (e) {
+    console.error('[storage] could not read users registry', e);
+    users = [];
   }
 }
 
-/**
- * Load users registry
- */
-async function loadUsersRegistry(): Promise<void> {
-  try {
-    const fileInfo = await FileSystem.getInfoAsync(USERS_REGISTRY_FILE);
-    if (fileInfo.exists) {
-      const content = await FileSystem.readAsStringAsync(USERS_REGISTRY_FILE);
-      if (content) {
-        const registry = JSON.parse(content);
-        appData.users = registry.users || [];
-        console.log('Users registry loaded. Total users:', appData.users.length);
-      } else {
-        console.log('Users registry file is empty');
-        appData.users = [];
-      }
-    } else {
-      console.log('Users registry file does not exist yet');
-      appData.users = [];
-    }
-  } catch (error) {
-    console.error('Error loading users registry:', error);
-    appData.users = [];
-  }
+async function saveRegistry(): Promise<void> {
+  await files.write(REGISTRY_FILE, JSON.stringify({ users }));
 }
 
-/**
- * Save users registry
- */
-async function saveUsersRegistry(): Promise<void> {
-  try {
-    const data = JSON.stringify({ users: appData.users }, null, 2);
-    await FileSystem.writeAsStringAsync(USERS_REGISTRY_FILE, data);
-  } catch (error) {
-    console.error('Error saving users registry:', error);
-  }
+function findUser(identifier: string): User | undefined {
+  const id = identifier.trim().toLowerCase();
+  return users.find((u) => u.username.toLowerCase() === id || u.email.toLowerCase() === id);
 }
 
-/**
- * Load user-specific data (encrypted vault)
- * @param userId - User ID
- * @param masterPassword - Master password for decryption (optional if vault is not encrypted yet)
- */
-export async function loadUserData(userId: string, masterPassword?: string): Promise<void> {
-  try {
-    console.log(`[loadUserData] Loading data for userId: ${userId}, hasMasterPassword: ${!!masterPassword}`);
-    const dataFile = getUserDataFile(userId);
-    const fileInfo = await FileSystem.getInfoAsync(dataFile);
-    
-    if (fileInfo.exists) {
-      console.log(`[loadUserData] File exists: ${dataFile}`);
-      const content = await FileSystem.readAsStringAsync(dataFile);
-      console.log(`[loadUserData] File content length: ${content.length}`);
-      
-      if (content) {
-        try {
-          // Try to parse as JSON first (for unencrypted data or metadata)
-          const userData = JSON.parse(content);
-          
-          // Check if data is encrypted
-          if (userData.encrypted && userData.data) {
-            // Data is encrypted - decrypt it
-            if (!masterPassword) {
-              console.warn('[loadUserData] Encrypted vault found but no master password provided');
-              // Initialize empty data if no master password
-              appData.passwords = [];
-              appData.mfaApprovals = [];
-              appData.emailAliases = [];
-              return;
-            }
-            
-            try {
-              console.log('[loadUserData] Decrypting encrypted vault...');
-              const decryptedContent = await decryptData(userData.data, masterPassword);
-              const decryptedData = JSON.parse(decryptedContent);
-              appData.passwords = decryptedData.passwords || [];
-              appData.mfaApprovals = decryptedData.mfaApprovals || [];
-              appData.emailAliases = decryptedData.emailAliases || [];
-              console.log(`[loadUserData] ✅ Decrypted successfully - Passwords: ${appData.passwords.length}, MFA: ${appData.mfaApprovals.length}, Aliases: ${appData.emailAliases.length}`);
-            } catch (decryptError) {
-              console.error('[loadUserData] ❌ Error decrypting user data:', decryptError);
-              throw new Error('Failed to decrypt vault. Incorrect master password.');
-            }
-          } else {
-            // Legacy unencrypted data - migrate to encrypted
-            console.log('[loadUserData] Loading unencrypted data (legacy format)');
-            appData.passwords = userData.passwords || [];
-            appData.mfaApprovals = userData.mfaApprovals || [];
-            appData.emailAliases = userData.emailAliases || [];
-            console.log(`[loadUserData] Loaded - Passwords: ${appData.passwords.length}, MFA: ${appData.mfaApprovals.length}, Aliases: ${appData.emailAliases.length}`);
-            
-            // If master password is available, encrypt and save
-            if (masterPassword && (appData.passwords.length > 0 || appData.mfaApprovals.length > 0 || appData.emailAliases.length > 0)) {
-              console.log('[loadUserData] Migrating unencrypted data to encrypted format...');
-              await saveUserData(userId, masterPassword);
-            }
-          }
-        } catch (parseError) {
-          // If JSON parsing fails, data might be in old format
-          console.error('[loadUserData] ❌ Error parsing user data:', parseError);
-          appData.passwords = [];
-          appData.mfaApprovals = [];
-          appData.emailAliases = [];
-        }
-      } else {
-        console.log('[loadUserData] File exists but is empty, initializing empty data');
-        appData.passwords = [];
-        appData.mfaApprovals = [];
-        appData.emailAliases = [];
-      }
-    } else {
-      // Initialize empty data
-      console.log(`[loadUserData] File does not exist, initializing empty data`);
-      appData.passwords = [];
-      appData.mfaApprovals = [];
-      appData.emailAliases = [];
-    }
-  } catch (error) {
-    console.error('[loadUserData] ❌ Error loading user data:', error);
-    appData.passwords = [];
-    appData.mfaApprovals = [];
-    appData.emailAliases = [];
+async function updateUser(user: User): Promise<void> {
+  const i = users.findIndex((u) => u.id === user.id);
+  if (i === -1) users.push(user);
+  else users[i] = user;
+  await saveRegistry();
+  const current = await AsyncStorage.getItem(USER_KEY);
+  if (current && (JSON.parse(current) as User).id === user.id) {
+    await AsyncStorage.setItem(USER_KEY, JSON.stringify(user));
   }
+  emit();
 }
 
-/**
- * Save user-specific data (encrypted vault)
- * @param userId - User ID
- * @param masterPassword - Master password for encryption (optional - if not provided, saves unencrypted)
- */
-async function saveUserData(userId: string, masterPassword?: string): Promise<void> {
-  try {
-    console.log(`[saveUserData] Starting save for userId: ${userId}, hasMasterPassword: ${!!masterPassword}`);
-    console.log(`[saveUserData] Current data - Passwords: ${appData.passwords.length}, MFA: ${appData.mfaApprovals.length}, Aliases: ${appData.emailAliases.length}`);
-    
-    // Ensure user directory exists
-    const userDir = getUserDataDirectory(userId);
-    const dirInfo = await FileSystem.getInfoAsync(userDir);
-    if (!dirInfo.exists) {
-      console.log(`[saveUserData] Creating user directory: ${userDir}`);
-      await FileSystem.makeDirectoryAsync(userDir, { intermediates: true });
-    }
-
-    const dataFile = getUserDataFile(userId);
-    const data = {
-      passwords: appData.passwords,
-      mfaApprovals: appData.mfaApprovals,
-      emailAliases: appData.emailAliases,
-    };
-    
-    console.log(`[saveUserData] Data to save - Passwords: ${data.passwords.length}, MFA: ${data.mfaApprovals.length}, Aliases: ${data.emailAliases.length}`);
-    
-    // If master password is provided, always encrypt (even if vault is empty)
-    // This ensures the vault is properly initialized as encrypted
-    if (masterPassword) {
-      try {
-        console.log(`[saveUserData] Encrypting data with master password...`);
-        const dataString = JSON.stringify(data);
-        console.log(`[saveUserData] Data string length: ${dataString.length}`);
-        
-        const encryptedData = await encryptData(dataString, masterPassword, userId);
-        console.log(`[saveUserData] Encryption successful, encrypted data length: ${encryptedData.length}`);
-        
-        // Store as encrypted vault
-        const vaultData = {
-          encrypted: true,
-          data: encryptedData,
-          version: '1.0',
-          updatedAt: new Date().toISOString(),
-        };
-        
-        const vaultDataString = JSON.stringify(vaultData, null, 2);
-        console.log(`[saveUserData] Writing to file: ${dataFile}`);
-        await FileSystem.writeAsStringAsync(dataFile, vaultDataString);
-        
-        // Verify the file was written
-        const verifyInfo = await FileSystem.getInfoAsync(dataFile);
-        if (verifyInfo.exists) {
-          const verifyContent = await FileSystem.readAsStringAsync(dataFile);
-          if (verifyContent && verifyContent.length > 0) {
-            console.log(`[saveUserData] ✅ Vault encrypted and saved successfully. File size: ${verifyContent.length} bytes`);
-          } else {
-            console.error(`[saveUserData] ❌ File exists but is empty!`);
-            throw new Error('File was written but is empty');
-          }
-        } else {
-          console.error(`[saveUserData] ❌ File does not exist after write!`);
-          throw new Error('File was not created');
-        }
-      } catch (encryptError) {
-        console.error('[saveUserData] ❌ Error encrypting user data:', encryptError);
-        // Don't fallback - throw error so user knows encryption failed
-        throw new Error(`Failed to encrypt vault: ${encryptError instanceof Error ? encryptError.message : 'Unknown error'}`);
-      }
-    } else {
-      // No master password - store unencrypted (for initial setup only)
-      // This should only happen before master password is set
-      console.log(`[saveUserData] Saving unencrypted data (no master password set)`);
-      const dataString = JSON.stringify(data, null, 2);
-      await FileSystem.writeAsStringAsync(dataFile, dataString);
-      
-      // Verify the file was written
-      const verifyInfo = await FileSystem.getInfoAsync(dataFile);
-      if (verifyInfo.exists) {
-        console.log(`[saveUserData] ✅ Vault saved unencrypted (no master password set). File exists.`);
-      } else {
-        console.error(`[saveUserData] ❌ File does not exist after write!`);
-        throw new Error('File was not created');
-      }
-    }
-  } catch (error) {
-    console.error('[saveUserData] ❌ Error saving user data:', error);
-    throw error;
-  }
-}
-
-/**
- * Get current user ID
- */
-async function getCurrentUserId(): Promise<string | null> {
-  try {
-    const userStr = await AsyncStorage.getItem(USER_KEY);
-    if (!userStr) return null;
-    const user = JSON.parse(userStr) as User;
-    return user.id;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * User Management
- */
-/**
- * Create a new user account
- * @param username - Username for login
- * @param email - Email address
- * @param accountPassword - Password for account login (different from master password)
- * @returns Created user object
- */
-export async function createUser(
-  username: string,
-  email: string,
-  accountPassword: string
-): Promise<User> {
-  await initStorage();
-
-  // Check if user already exists
-  const existingUser = appData.users.find(u => u.username === username || u.email === email);
-  if (existingUser) {
-    throw new Error('Username or email already exists');
-  }
-
-  const id = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  const accountPasswordHash = await hashPassword(accountPassword);
-  const createdAt = new Date().toISOString();
-
-  const user: User = {
-    id,
-    username,
-    email,
-    accountPasswordHash: accountPasswordHash,
-    masterPasswordHash: undefined, // Master password will be set separately
-    biometricEnabled: false,
-    createdAt,
-  };
-
-  appData.users.push(user);
-  await saveUsersRegistry();
-  console.log('User created and saved to registry. User ID:', id);
-  
-  // Create user data directory and initialize empty data (unencrypted until master password is set)
-  try {
-    await loadUserData(id);
-    await saveUserData(id); // Save without encryption initially
-    console.log('User data directory initialized');
-  } catch (error) {
-    console.error('Error initializing user data directory:', error);
-    // Don't fail user creation if data directory init fails
-  }
-  
-  // Set user in AsyncStorage
+async function setCurrentUser(user: User): Promise<void> {
   await AsyncStorage.setItem(USER_KEY, JSON.stringify(user));
-  console.log('User set in AsyncStorage');
-
-  return user;
-}
-
-/**
- * Set master password for vault encryption
- * @param userId - User ID
- * @param masterPassword - Master password for vault encryption
- */
-export async function setMasterPassword(userId: string, masterPassword: string): Promise<void> {
-  try {
-    await initStorage();
-    console.log('Setting master password for userId:', userId);
-    console.log('Total users in registry:', appData.users.length);
-    
-    // Reload users registry to ensure we have the latest data
-    await loadUsersRegistry();
-    
-    // Find user
-    const user = appData.users.find(u => u.id === userId);
-    if (!user) {
-      console.error('User not found in registry. Available users:', appData.users.map(u => ({ id: u.id, username: u.username })));
-      throw new Error(`User not found. UserId: ${userId}`);
-    }
-    
-    console.log('Found user:', user.username);
-    
-    // Hash master password
-    console.log('Hashing master password...');
-    const masterPasswordHash = await hashPassword(masterPassword);
-    user.masterPasswordHash = masterPasswordHash;
-    console.log('Master password hashed successfully');
-    
-    // Save updated user registry
-    console.log('Saving users registry...');
-    await saveUsersRegistry();
-    console.log('Users registry saved');
-    
-    // Load current user data (might be unencrypted or empty)
-    console.log('Loading user data...');
-    await loadUserData(userId); // Load without master password (for unencrypted data)
-    console.log('User data loaded. Passwords:', appData.passwords.length, 'MFA:', appData.mfaApprovals.length, 'Aliases:', appData.emailAliases.length);
-    
-    // Encrypt and save vault data with master password
-    console.log('Encrypting and saving user data...');
-    await saveUserData(userId, masterPassword);
-    console.log('User data encrypted and saved');
-    
-    // Update current user in AsyncStorage if this is the current user
-    try {
-      const currentUserStr = await AsyncStorage.getItem(USER_KEY);
-      if (currentUserStr) {
-        const currentUser = JSON.parse(currentUserStr) as User;
-        if (currentUser.id === userId) {
-          // Update the user object with master password hash
-          const updatedUser: User = {
-            ...currentUser,
-            masterPasswordHash: masterPasswordHash,
-          };
-          await AsyncStorage.setItem(USER_KEY, JSON.stringify(updatedUser));
-          console.log('Current user updated in AsyncStorage');
-        }
-      }
-    } catch (error) {
-      console.error('Error updating current user in AsyncStorage:', error);
-      // Don't throw - the registry is updated, which is the source of truth
-    }
-    
-    console.log('Master password set successfully for user:', user.username);
-  } catch (error) {
-    console.error('Error in setMasterPassword:', error);
-    throw error;
-  }
-}
-
-export async function getUserByUsername(username: string): Promise<User | null> {
-  await initStorage();
-  const user = appData.users.find(u => u.username === username || u.email === username);
-  return user || null;
 }
 
 export async function getCurrentUser(): Promise<User | null> {
   try {
-    const userStr = await AsyncStorage.getItem(USER_KEY);
-    if (!userStr) return null;
-    return JSON.parse(userStr) as User;
+    const raw = await AsyncStorage.getItem(USER_KEY);
+    if (!raw) return null;
+    const stored = JSON.parse(raw) as User;
+    if (users.length === 0) await initStorage();
+    return users.find((u) => u.id === stored.id) ?? stored;
   } catch {
     return null;
   }
 }
 
-/**
- * Verify account password (for login)
- */
-export async function verifyAccountPassword(
-  user: User,
-  password: string
-): Promise<boolean> {
-  const hash = await hashPassword(password);
-  return hash === user.accountPasswordHash;
-}
-
-/**
- * Verify master password (for vault decryption)
- */
-export async function verifyMasterPassword(
-  user: User,
-  masterPassword: string
-): Promise<boolean> {
-  if (!user.masterPasswordHash) {
-    return false; // Master password not set
-  }
-  const hash = await hashPassword(masterPassword);
-  return hash === user.masterPasswordHash;
-}
-
-/**
- * Change master password (re-encrypts vault with new password)
- */
-export async function changeMasterPassword(
-  userId: string,
-  oldMasterPassword: string,
-  newMasterPassword: string
-): Promise<void> {
+export async function getUserByUsername(identifier: string): Promise<User | null> {
   await initStorage();
-  
-  // Find user
-  const user = appData.users.find(u => u.id === userId);
-  if (!user) {
-    throw new Error('User not found');
+  return findUser(identifier) ?? null;
+}
+
+export async function createUser(username: string, email: string, accountPassword: string): Promise<User> {
+  await initStorage();
+  if (findUser(username) || findUser(email)) {
+    throw new VaultError('EXISTS', 'An account with that username or email already exists on this device.');
   }
-  
-  // Verify old master password
-  const isValid = await verifyMasterPassword(user, oldMasterPassword);
-  if (!isValid) {
-    throw new Error('Current master password is incorrect');
+  const user: User = {
+    id: C.randomId('user'),
+    username: username.trim(),
+    email: email.trim().toLowerCase(),
+    accountPasswordHash: await C.hashSecret(accountPassword),
+    biometricEnabled: false,
+    createdAt: new Date().toISOString(),
+    recoveryEmail: email.trim().toLowerCase(),
+  };
+  users.push(user);
+  await saveRegistry();
+  await setCurrentUser(user);
+  return user;
+}
+
+export async function verifyAccountPassword(user: User, password: string): Promise<boolean> {
+  const { ok, legacy } = await C.verifySecret(password, user.accountPasswordHash);
+  if (ok && legacy) {
+    await updateUser({ ...user, accountPasswordHash: await C.hashSecret(password) });
   }
-  
-  // Load and decrypt vault with old master password
-  await loadUserData(userId, oldMasterPassword);
-  
-  // Update master password hash
-  const newHash = await hashPassword(newMasterPassword);
-  user.masterPasswordHash = newHash;
-  
-  // Re-encrypt vault with new master password
-  await saveUserData(userId, newMasterPassword);
-  
-  // Save updated user registry
-  await saveUsersRegistry();
-  
-  // Update current user in AsyncStorage if this is the current user
-  try {
-    const currentUserStr = await AsyncStorage.getItem(USER_KEY);
-    if (currentUserStr) {
-      const currentUser = JSON.parse(currentUserStr) as User;
-      if (currentUser.id === userId) {
-        await AsyncStorage.setItem(USER_KEY, JSON.stringify(user));
-      }
-    }
-  } catch (error) {
-    console.error('Error updating current user in AsyncStorage:', error);
-  }
-  
-  console.log('Master password changed successfully for user:', user.username);
+  return ok;
+}
+
+export async function changeAccountPassword(userId: string, current: string, next: string): Promise<void> {
+  await initStorage();
+  const user = users.find((u) => u.id === userId);
+  if (!user) throw new VaultError('NO_USER', 'User not found.');
+  if (!(await verifyAccountPassword(user, current))) throw new VaultError('BAD_PASSWORD', 'Current account password is incorrect.');
+  await updateUser({ ...user, accountPasswordHash: await C.hashSecret(next) });
+}
+
+/* ---------------- vault lifecycle ---------------- */
+
+async function persist(): Promise<void> {
+  if (!session || !header) throw new VaultError('LOCKED', 'Your vault is locked.');
+  header.payload = C.sealJSON(session.dek, data);
+  header.updatedAt = new Date().toISOString();
+  const content = JSON.stringify(header);
+  const path = vaultPath(session.userId);
+  const job = writeChain.then(() => files.write(path, content));
+  writeChain = job.catch(() => undefined);
+  await job;
+  emit();
+}
+
+function normalize(d: Partial<VaultData> | null | undefined): VaultData {
+  return {
+    passwords: d?.passwords ?? [],
+    mfaApprovals: d?.mfaApprovals ?? [],
+    emailAliases: d?.emailAliases ?? [],
+    knownDevices: d?.knownDevices ?? [],
+  };
+}
+
+async function readVaultFile(userId: string): Promise<VaultFile> {
+  const raw = await files.read(vaultPath(userId));
+  if (!raw) throw new VaultError('NO_VAULT', 'No vault found for this account on this device.');
+  const parsed = JSON.parse(raw);
+  if (parsed.version !== 2) throw new VaultError('NO_VAULT', 'This vault needs to be migrated.');
+  return parsed as VaultFile;
+}
+
+async function wrapRecovery(dek: Uint8Array): Promise<{ key: string; box: VaultFile['keys']['recovery'] }> {
+  const key = C.generateRecoveryKey();
+  const kdf = { salt: C.toBase64(C.randomBytes(16)), iterations: 10_000 };
+  const rkek = await C.deriveKey(C.normalizeRecoveryKey(key), kdf.salt, kdf.iterations);
+  return { key, box: { ...C.seal(rkek, dek), ...kdf } };
+}
+
+async function wrapDevice(userId: string, dek: Uint8Array): Promise<C.Box> {
+  const escrow = C.randomBytes(32);
+  await secure.set(escrowKeyName(userId), C.toBase64(escrow));
+  return C.seal(escrow, dek);
 }
 
 /**
- * Change account password (for login)
+ * Creates the encrypted vault for a new account (or re-creates it during
+ * migration). Returns the backup recovery key, which must be shown to the user once.
  */
-export async function changeAccountPassword(
+export async function setupMasterPassword(
   userId: string,
-  oldAccountPassword: string,
-  newAccountPassword: string
-): Promise<void> {
+  masterPassword: string,
+  initialData?: Partial<VaultData>
+): Promise<{ recoveryKey: string }> {
   await initStorage();
-  
-  // Find user
-  const user = appData.users.find(u => u.id === userId);
-  if (!user) {
-    throw new Error('User not found');
-  }
-  
-  // Verify old account password
-  const isValid = await verifyAccountPassword(user, oldAccountPassword);
-  if (!isValid) {
-    throw new Error('Current account password is incorrect');
-  }
-  
-  // Update account password hash
-  const newHash = await hashPassword(newAccountPassword);
-  user.accountPasswordHash = newHash;
-  
-  // Save updated user registry
-  await saveUsersRegistry();
-  
-  // Update current user in AsyncStorage if this is the current user
-  try {
-    const currentUserStr = await AsyncStorage.getItem(USER_KEY);
-    if (currentUserStr) {
-      const currentUser = JSON.parse(currentUserStr) as User;
-      if (currentUser.id === userId) {
-        await AsyncStorage.setItem(USER_KEY, JSON.stringify(user));
-      }
-    }
-  } catch (error) {
-    console.error('Error updating current user in AsyncStorage:', error);
-  }
-  
-  console.log('Account password changed successfully for user:', user.username);
+  const user = users.find((u) => u.id === userId);
+  if (!user) throw new VaultError('NO_USER', 'User not found.');
+
+  const kdf = C.newKdfParams();
+  const kek = await C.deriveKey(masterPassword, kdf.salt, kdf.iterations);
+  const dek = C.randomBytes(32);
+  const recovery = await wrapRecovery(dek);
+
+  header = {
+    encrypted: true,
+    version: 2,
+    kdf,
+    keys: { master: C.seal(kek, dek), recovery: recovery.box, device: await wrapDevice(userId, dek) },
+    payload: { iv: '', ct: '' },
+    updatedAt: new Date().toISOString(),
+  };
+  session = { userId, dek };
+  data = normalize(initialData);
+
+  const now = new Date().toISOString();
+  await updateUser({
+    ...user,
+    kdf,
+    masterPasswordHash: C.makeVerifier(kek),
+    hasRecoveryKey: true,
+    recoveryKeyCreatedAt: now,
+    recoveryEmail: user.recoveryEmail ?? user.email,
+  });
+  await setCurrentUser(users.find((u) => u.id === userId)!);
+  await persist();
+  return { recoveryKey: recovery.key };
 }
 
-export async function setBiometricEnabled(enabled: boolean): Promise<void> {
-  await AsyncStorage.setItem(BIOMETRIC_ENABLED_KEY, enabled.toString());
-  const user = await getCurrentUser();
-  if (user) {
-    await initStorage();
-    const index = appData.users.findIndex(u => u.id === user.id);
-    if (index !== -1) {
-      appData.users[index].biometricEnabled = enabled;
-      await saveUsersRegistry();
-    }
-  }
-}
+/** Kept for older call sites. */
+export const setMasterPassword = setupMasterPassword;
 
-export async function isBiometricEnabled(): Promise<boolean> {
+async function openSession(user: User, unwrap: (h: VaultFile) => Uint8Array): Promise<void> {
+  const h = await readVaultFile(user.id);
+  let dek: Uint8Array;
   try {
-    const enabled = await AsyncStorage.getItem(BIOMETRIC_ENABLED_KEY);
-    return enabled === 'true';
+    dek = unwrap(h);
   } catch {
-    return false;
+    throw new VaultError('BAD_PASSWORD', 'Could not unlock the vault.');
   }
+  data = normalize(C.openJSON<VaultData>(dek, h.payload));
+  header = h;
+  session = { userId: user.id, dek };
+  await setCurrentUser(user);
+  emit();
 }
 
-export async function setOnboardingCompleted(): Promise<void> {
-  // Store onboarding status per user
-  const userId = await getCurrentUserId();
-  if (userId) {
-    await AsyncStorage.setItem(`${ONBOARDING_COMPLETED_KEY}_${userId}`, 'true');
+export interface UnlockResult {
+  user: User;
+  /** Set when an old vault was upgraded: show this new recovery key to the user. */
+  migratedRecoveryKey?: string;
+}
+
+/** Unlock with username/email + master password. */
+export async function unlockWithMasterPassword(identifier: string, masterPassword: string): Promise<UnlockResult> {
+  await initStorage();
+  const user = findUser(identifier) ?? users.find((u) => u.id === identifier);
+  if (!user) throw new VaultError('NO_USER', 'No account with that username or email on this device.');
+  if (!user.masterPasswordHash) throw new VaultError('NO_VAULT', 'This account has not finished setting up a master password.');
+
+  // Legacy (pre-UPIC) vault: verify old hash, decrypt old format, upgrade to v2.
+  if (!user.masterPasswordHash.startsWith('v2:')) {
+    if (!(await C.legacyMasterHashMatches(masterPassword, user.masterPasswordHash))) {
+      throw new VaultError('BAD_PASSWORD', 'Incorrect master password.');
+    }
+    let legacy: Partial<VaultData> = {};
+    const raw = await files.read(vaultPath(user.id));
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      legacy = parsed.encrypted && parsed.data ? JSON.parse(await legacyDecrypt(parsed.data, masterPassword)) : parsed;
+    }
+    await setCurrentUser(user);
+    const { recoveryKey } = await setupMasterPassword(user.id, masterPassword, legacy);
+    return { user: users.find((u) => u.id === user.id)!, migratedRecoveryKey: recoveryKey };
+  }
+
+  const kdf = user.kdf!;
+  const kek = await C.deriveKey(masterPassword, kdf.salt, kdf.iterations);
+  if (!C.constantTimeEqual(C.makeVerifier(kek), user.masterPasswordHash)) {
+    throw new VaultError('BAD_PASSWORD', 'Incorrect master password.');
+  }
+  await openSession(user, (h) => C.open(kek, h.keys.master));
+  return { user };
+}
+
+/** Unlock with the data key released by a successful biometric check. */
+export async function unlockWithDataKey(userId: string, dekB64: string): Promise<User> {
+  await initStorage();
+  const user = users.find((u) => u.id === userId);
+  if (!user) throw new VaultError('NO_USER', 'User not found.');
+  await openSession(user, () => C.fromBase64(dekB64));
+  return user;
+}
+
+export function getSessionDataKey(): string | null {
+  return session ? C.toBase64(session.dek) : null;
+}
+
+export function isUnlocked(): boolean {
+  return session !== null;
+}
+
+/** Clears keys and decrypted data from memory. The account stays on the device. */
+export function lockVault(): void {
+  if (session) session.dek.fill(0);
+  session = null;
+  header = null;
+  data = emptyData();
+  emit();
+}
+
+/** Signs out completely: locks and forgets the current account selection. */
+export async function logout(): Promise<void> {
+  lockVault();
+  await AsyncStorage.removeItem(USER_KEY);
+}
+
+async function resetMasterKey(userId: string, newMaster: string): Promise<void> {
+  if (!session || !header) throw new VaultError('LOCKED', 'Your vault is locked.');
+  const user = users.find((u) => u.id === userId)!;
+  const kdf = C.newKdfParams();
+  const kek = await C.deriveKey(newMaster, kdf.salt, kdf.iterations);
+  header.kdf = kdf;
+  header.keys.master = C.seal(kek, session.dek);
+  await updateUser({ ...user, kdf, masterPasswordHash: C.makeVerifier(kek) });
+  await persist();
+}
+
+/** Re-checks the master password of the unlocked account (for sensitive actions such as export). */
+export async function confirmMasterPassword(candidate: string): Promise<boolean> {
+  if (!session) return false;
+  const user = users.find((u) => u.id === session!.userId);
+  if (!user?.kdf || !user.masterPasswordHash) return false;
+  const kek = await C.deriveKey(candidate, user.kdf.salt, user.kdf.iterations);
+  return C.constantTimeEqual(C.makeVerifier(kek), user.masterPasswordHash);
+}
+
+export async function changeMasterPassword(current: string, next: string): Promise<void> {
+  if (!session) throw new VaultError('LOCKED', 'Your vault is locked.');
+  const user = users.find((u) => u.id === session!.userId)!;
+  const kek = await C.deriveKey(current, user.kdf!.salt, user.kdf!.iterations);
+  if (!C.constantTimeEqual(C.makeVerifier(kek), user.masterPasswordHash ?? '')) {
+    throw new VaultError('BAD_PASSWORD', 'Current master password is incorrect.');
+  }
+  await resetMasterKey(user.id, next);
+}
+
+/* ---------------- recovery ---------------- */
+
+/** Forgot master password → backup recovery key. Returns a fresh recovery key (the old one stops working). */
+export async function recoverWithRecoveryKey(
+  identifier: string,
+  recoveryKey: string,
+  newMaster: string
+): Promise<{ recoveryKey: string; user: User }> {
+  await initStorage();
+  const user = findUser(identifier);
+  if (!user) throw new VaultError('NO_USER', 'No account with that username or email on this device.');
+  const h = await readVaultFile(user.id);
+  if (!h.keys.recovery) throw new VaultError('BAD_RECOVERY_KEY', 'This vault has no recovery key.');
+  const rkek = await C.deriveKey(C.normalizeRecoveryKey(recoveryKey), h.keys.recovery.salt, h.keys.recovery.iterations);
+  try {
+    await openSession(user, (vf) => C.open(rkek, vf.keys.recovery!));
+  } catch {
+    throw new VaultError('BAD_RECOVERY_KEY', 'That recovery key does not match this account.');
+  }
+  await resetMasterKey(user.id, newMaster);
+  const fresh = await rotateRecoveryKey();
+  return { recoveryKey: fresh, user: users.find((u) => u.id === user.id)! };
+}
+
+/** Forgot master password → verified email/phone on this trusted device. */
+export async function recoverOnThisDevice(identifier: string, newMaster: string): Promise<User> {
+  await initStorage();
+  const user = findUser(identifier);
+  if (!user) throw new VaultError('NO_USER', 'No account with that username or email on this device.');
+  const escrow = await secure.get(escrowKeyName(user.id));
+  const h = await readVaultFile(user.id);
+  if (!escrow || !h.keys.device) {
+    throw new VaultError('NO_DEVICE_RECOVERY', 'Email/phone recovery is turned off for this device. Use your recovery key.');
+  }
+  await openSession(user, (vf) => C.open(C.fromBase64(escrow), vf.keys.device!));
+  await resetMasterKey(user.id, newMaster);
+  return users.find((u) => u.id === user.id)!;
+}
+
+export async function rotateRecoveryKey(): Promise<string> {
+  if (!session || !header) throw new VaultError('LOCKED', 'Your vault is locked.');
+  const recovery = await wrapRecovery(session.dek);
+  header.keys.recovery = recovery.box;
+  const user = users.find((u) => u.id === session!.userId)!;
+  await updateUser({ ...user, hasRecoveryKey: true, recoveryKeyCreatedAt: new Date().toISOString() });
+  await persist();
+  return recovery.key;
+}
+
+export function isDeviceRecoveryEnabled(): boolean {
+  return !!header?.keys.device;
+}
+
+export async function setDeviceRecoveryEnabled(enabled: boolean): Promise<void> {
+  if (!session || !header) throw new VaultError('LOCKED', 'Your vault is locked.');
+  if (enabled) {
+    header.keys.device = await wrapDevice(session.userId, session.dek);
   } else {
-    await AsyncStorage.setItem(ONBOARDING_COMPLETED_KEY, 'true');
+    delete header.keys.device;
+    await secure.remove(escrowKeyName(session.userId));
   }
+  await persist();
 }
 
-export async function isOnboardingCompleted(): Promise<boolean> {
-  try {
-    const userId = await getCurrentUserId();
-    if (userId) {
-      const completed = await AsyncStorage.getItem(`${ONBOARDING_COMPLETED_KEY}_${userId}`);
-      return completed === 'true';
-    } else {
-      const completed = await AsyncStorage.getItem(ONBOARDING_COMPLETED_KEY);
-      return completed === 'true';
-    }
-  } catch {
-    return false;
-  }
+export async function updateRecoveryContacts(contacts: { recoveryEmail?: string; recoveryPhone?: string }): Promise<User> {
+  const current = await getCurrentUser();
+  if (!current) throw new VaultError('NO_USER', 'Not signed in.');
+  const updated = { ...current, ...contacts };
+  await updateUser(updated);
+  return updated;
 }
 
-/**
- * Password Management
- */
+export async function setBiometricFlag(userId: string, enabled: boolean): Promise<void> {
+  const user = users.find((u) => u.id === userId);
+  if (user) await updateUser({ ...user, biometricEnabled: enabled });
+}
+
+/* ---------------- walkthrough flag ---------------- */
+
+export async function setWalkthroughDone(userId: string, done = true): Promise<void> {
+  if (done) await AsyncStorage.setItem(`${WALKTHROUGH_KEY}_${userId}`, 'true');
+  else await AsyncStorage.removeItem(`${WALKTHROUGH_KEY}_${userId}`);
+}
+
+export async function isWalkthroughDone(userId: string): Promise<boolean> {
+  return (await AsyncStorage.getItem(`${WALKTHROUGH_KEY}_${userId}`)) === 'true';
+}
+
+/* ---------------- passwords ---------------- */
+
+function requireSession() {
+  if (!session) throw new VaultError('LOCKED', 'Your vault is locked. Unlock it and try again.');
+}
+
+export async function getAllPasswords(_legacyMasterPassword?: string): Promise<PasswordEntry[]> {
+  return [...data.passwords];
+}
+
+export async function getPassword(id: string, _legacyMasterPassword?: string): Promise<PasswordEntry | null> {
+  return data.passwords.find((p) => p.id === id) ?? null;
+}
+
 export async function savePassword(
   entry: Partial<PasswordEntry> & { website: string; username: string; password: string },
-  masterPassword: string
+  _legacyMasterPassword?: string
 ): Promise<PasswordEntry> {
-  try {
-    console.log('[savePassword] Starting save password operation');
-    await initStorage();
-    const userId = await getCurrentUserId();
-    if (!userId) {
-      console.error('[savePassword] ❌ User not logged in');
-      throw new Error('User not logged in');
-    }
+  requireSession();
+  const now = new Date().toISOString();
+  const existing = entry.id ? data.passwords.find((p) => p.id === entry.id) : undefined;
+  const saved: PasswordEntry = {
+    ...existing,
+    ...entry,
+    id: existing?.id ?? C.randomId('pwd'),
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: existing && existing.password === entry.password ? existing.updatedAt : now,
+  } as PasswordEntry;
+  if (existing && existing.password !== entry.password) saved.isBreached = false;
+  data.passwords = existing ? data.passwords.map((p) => (p.id === saved.id ? saved : p)) : [...data.passwords, saved];
+  await persist();
+  return saved;
+}
 
-    console.log(`[savePassword] User ID: ${userId}`);
-    console.log(`[savePassword] Entry data:`, { website: entry.website, username: entry.username, hasPassword: !!entry.password, hasId: !!(entry as any).id });
+export async function deletePassword(id: string, _legacyMasterPassword?: string): Promise<void> {
+  requireSession();
+  data.passwords = data.passwords.filter((p) => p.id !== id);
+  await persist();
+}
 
-    // Load user data with master password for decryption
-    console.log('[savePassword] Loading user data...');
-    await loadUserData(userId, masterPassword);
-    console.log(`[savePassword] Loaded data - Passwords: ${appData.passwords.length}, MFA: ${appData.mfaApprovals.length}, Aliases: ${appData.emailAliases.length}`);
+export async function updatePasswordLastUsed(id: string, _legacyMasterPassword?: string): Promise<void> {
+  if (!session) return;
+  const p = data.passwords.find((x) => x.id === id);
+  if (!p) return;
+  p.lastUsed = new Date().toISOString();
+  await persist();
+}
 
-    const id = (entry as any).id || `pwd_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const now = new Date().toISOString();
+export async function setPasswordFavorite(id: string, favorite: boolean): Promise<void> {
+  requireSession();
+  const p = data.passwords.find((x) => x.id === id);
+  if (!p) return;
+  p.favorite = favorite;
+  await persist();
+}
 
-    const existingEntry = (entry as any).id ? appData.passwords.find(p => p.id === id) : null;
-    const passwordEntry: PasswordEntry = {
-      id,
-      website: entry.website,
-      username: entry.username,
-      password: entry.password,
-      notes: entry.notes,
-      lastUsed: entry.lastUsed,
-      category: entry.category,
-      tags: entry.tags,
-      isBreached: entry.isBreached,
-      isShared: entry.isShared,
-      sharedWith: entry.sharedWith,
-      iconUrl: entry.iconUrl,
-      createdAt: existingEntry?.createdAt || now,
-      updatedAt: now,
-    };
-
-    console.log(`[savePassword] Password entry prepared:`, { id, website: passwordEntry.website, username: passwordEntry.username });
-
-    const index = appData.passwords.findIndex(p => p.id === id);
-    if (index !== -1) {
-      console.log(`[savePassword] Updating existing password at index ${index}`);
-      appData.passwords[index] = passwordEntry;
-    } else {
-      console.log(`[savePassword] Adding new password entry`);
-      appData.passwords.push(passwordEntry);
-    }
-
-    console.log(`[savePassword] After update - Passwords in memory: ${appData.passwords.length}`);
-
-    // Save encrypted with master password
-    console.log('[savePassword] Saving user data to file...');
-    await saveUserData(userId, masterPassword);
-    
-    // Verify the file was written (don't reload data as it might cause issues)
-    const dataFile = getUserDataFile(userId);
-    const verifyInfo = await FileSystem.getInfoAsync(dataFile);
-    if (verifyInfo.exists) {
-      console.log(`[savePassword] ✅ Password saved successfully! File verified.`);
-    } else {
-      console.error(`[savePassword] ❌ File does not exist after save!`);
-      throw new Error('Password was not saved - file not found');
-    }
-    
-    return passwordEntry;
-  } catch (error) {
-    console.error('[savePassword] ❌ Error saving password:', error);
-    throw error;
+/** Adds many entries at once, skipping exact duplicates. Returns how many were added. */
+export async function importPasswords(
+  entries: { website: string; username: string; password: string; notes?: string; category?: string }[]
+): Promise<number> {
+  requireSession();
+  const now = new Date().toISOString();
+  let added = 0;
+  for (const e of entries) {
+    const dup = data.passwords.some(
+      (p) => p.website.toLowerCase() === e.website.toLowerCase() && p.username === e.username && p.password === e.password
+    );
+    if (dup || !e.website || !e.password) continue;
+    data.passwords.push({ ...e, id: C.randomId('pwd'), createdAt: now, updatedAt: now });
+    added++;
   }
+  await persist();
+  return added;
 }
 
-export async function getPassword(
-  passwordId: string,
-  masterPassword: string
-): Promise<PasswordEntry | null> {
-  await initStorage();
-  const userId = await getCurrentUserId();
-  if (!userId) return null;
+/* ---------------- MFA ---------------- */
 
-  // Load user data with master password for decryption
-  await loadUserData(userId, masterPassword);
-  const password = appData.passwords.find(p => p.id === passwordId);
-  return password || null;
-}
-
-export async function getAllPasswords(masterPassword: string): Promise<PasswordEntry[]> {
-  await initStorage();
-  const userId = await getCurrentUserId();
-  if (!userId) return [];
-
-  // Load user data with master password for decryption
-  await loadUserData(userId, masterPassword);
-  return appData.passwords;
-}
-
-export async function deletePassword(passwordId: string, masterPassword: string): Promise<void> {
-  await initStorage();
-  const userId = await getCurrentUserId();
-  if (!userId) throw new Error('User not logged in');
-
-  // Load user data with master password for decryption
-  await loadUserData(userId, masterPassword);
-  appData.passwords = appData.passwords.filter(p => p.id !== passwordId);
-  // Save encrypted with master password
-  await saveUserData(userId, masterPassword);
-}
-
-export async function updatePasswordLastUsed(passwordId: string, masterPassword?: string): Promise<void> {
-  await initStorage();
-  const userId = await getCurrentUserId();
-  if (!userId) return;
-
-  await loadUserData(userId, masterPassword);
-  const index = appData.passwords.findIndex(p => p.id === passwordId);
-  if (index !== -1) {
-    appData.passwords[index].lastUsed = new Date().toISOString();
-    await saveUserData(userId, masterPassword);
-  }
-}
-
-/**
- * MFA Management
- */
 export async function createMFAApproval(
   service: string,
   location: string,
-  deviceInfo?: string
+  deviceInfo?: string,
+  extra?: { ipAddress?: string; recognizedDevice?: boolean }
 ): Promise<MFAApproval> {
-  await initStorage();
-  const userId = await getCurrentUserId();
-  if (!userId) throw new Error('User not logged in');
-
-  await loadUserData(userId);
-
-  const id = `mfa_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  const timestamp = new Date().toISOString();
-
+  requireSession();
+  const now = Date.now();
   const approval: MFAApproval = {
-    id,
+    id: C.randomId('mfa'),
     service,
     location,
-    timestamp,
+    timestamp: new Date(now).toISOString(),
+    expiresAt: new Date(now + 2 * 60 * 1000).toISOString(),
     status: 'pending',
     deviceInfo,
+    ipAddress: extra?.ipAddress,
+    recognizedDevice: extra?.recognizedDevice ?? (deviceInfo ? data.knownDevices.includes(deviceInfo) : false),
   };
-
-  appData.mfaApprovals.push(approval);
-  await saveUserData(userId);
+  data.mfaApprovals.push(approval);
+  await persist();
   return approval;
 }
 
 export async function getPendingMFAApprovals(): Promise<MFAApproval[]> {
-  await initStorage();
-  const userId = await getCurrentUserId();
-  if (!userId) return [];
+  if (!session) return [];
+  const now = Date.now();
+  let changed = false;
+  data.mfaApprovals.forEach((a) => {
+    if (a.status === 'pending' && a.expiresAt && new Date(a.expiresAt).getTime() < now) {
+      a.status = 'expired';
+      changed = true;
+    }
+  });
+  if (changed) await persist();
+  return data.mfaApprovals.filter((a) => a.status === 'pending').sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+}
 
-  await loadUserData(userId);
-  return appData.mfaApprovals.filter(a => a.status === 'pending');
+export function getPendingMFACountSync(): number {
+  const now = Date.now();
+  return data.mfaApprovals.filter(
+    (a) => a.status === 'pending' && (!a.expiresAt || new Date(a.expiresAt).getTime() >= now)
+  ).length;
 }
 
 export async function getAllMFAApprovals(): Promise<MFAApproval[]> {
-  await initStorage();
-  const userId = await getCurrentUserId();
-  if (!userId) return [];
-
-  await loadUserData(userId);
-  return appData.mfaApprovals.slice(-50);
+  return [...data.mfaApprovals].sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, 100);
 }
 
-export async function updateMFAApprovalStatus(
-  approvalId: string,
-  status: 'approved' | 'denied'
-): Promise<void> {
-  await initStorage();
-  const userId = await getCurrentUserId();
-  if (!userId) throw new Error('User not logged in');
-
-  await loadUserData(userId);
-  const index = appData.mfaApprovals.findIndex(a => a.id === approvalId);
-  if (index !== -1) {
-    appData.mfaApprovals[index].status = status;
-    await saveUserData(userId);
+export async function updateMFAApprovalStatus(id: string, status: Exclude<MFAStatus, 'pending'>): Promise<void> {
+  requireSession();
+  const a = data.mfaApprovals.find((x) => x.id === id);
+  if (!a) return;
+  a.status = status;
+  a.respondedAt = new Date().toISOString();
+  if (status === 'approved' && a.deviceInfo && !data.knownDevices.includes(a.deviceInfo)) {
+    data.knownDevices.push(a.deviceInfo);
   }
+  await persist();
 }
 
-/**
- * Email Alias Management
- */
+/* ---------------- temporary emails (relay aliases) ---------------- */
+
+const ALIAS_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+
+export function makeAliasAddress(label?: string, website?: string): string {
+  const base = (label || website || 'mail')
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .split('.')[0]
+    .replace(/[^a-z0-9]/g, '')
+    .slice(0, 12) || 'mail';
+  return `${base}.${C.randomString(6, ALIAS_ALPHABET)}@relay.upic.app`;
+}
+
 export async function createEmailAlias(options?: {
+  address?: string;
+  label?: string;
+  website?: string;
+  forwardTo?: string;
+  expiresInDays?: number | null;
   autoExpire?: boolean;
-  expiresInDays?: number;
   replyMasking?: boolean;
 }): Promise<EmailAlias> {
-  await initStorage();
-  const userId = await getCurrentUserId();
-  if (!userId) throw new Error('User not logged in');
-
-  await loadUserData(userId);
-
-  const id = `alias_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  const alias = `alias-${id.substring(0, 8)}@relay.com`;
-  const createdAt = new Date().toISOString();
-  const expiresInDays = options?.expiresInDays || 90;
-  const expiresAt = options?.autoExpire 
-    ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // Auto-expire in 24 hours if enabled
-    : new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString();
-
-  const emailAlias: EmailAlias = {
-    id,
-    alias,
+  requireSession();
+  const now = Date.now();
+  const days = options?.expiresInDays;
+  const alias: EmailAlias = {
+    id: C.randomId('alias'),
+    alias: options?.address ?? makeAliasAddress(options?.label, options?.website),
+    label: options?.label,
+    website: options?.website,
+    forwardTo: options?.forwardTo,
     status: 'active',
-    createdAt,
-    expiresAt,
-    autoExpire: options?.autoExpire || false,
+    createdAt: new Date(now).toISOString(),
+    expiresAt: options?.autoExpire
+      ? new Date(now + 24 * 3600 * 1000).toISOString()
+      : days
+        ? new Date(now + days * 24 * 3600 * 1000).toISOString()
+        : undefined,
+    autoExpire: options?.autoExpire ?? false,
     usedCount: 0,
-    replyMasking: options?.replyMasking || false,
-    replyMaskingEnabled: options?.replyMasking || false,
+    replyMasking: options?.replyMasking ?? false,
+    replyMaskingEnabled: options?.replyMasking ?? false,
     emailsReceived: 0,
     loginsViaAlias: 0,
     trackerDetected: false,
     trackersBlocked: 0,
   };
-
-  appData.emailAliases.push(emailAlias);
-  await saveUserData(userId);
-  return emailAlias;
-}
-
-export async function recordEmailAliasUsage(aliasId: string, type: 'email' | 'login'): Promise<void> {
-  await initStorage();
-  const userId = await getCurrentUserId();
-  if (!userId) return;
-
-  await loadUserData(userId);
-  const alias = appData.emailAliases.find(a => a.id === aliasId);
-  if (!alias) return;
-
-  alias.usedCount = (alias.usedCount || 0) + 1;
-  alias.lastUsedAt = new Date().toISOString();
-  
-  if (type === 'email') {
-    alias.emailsReceived = (alias.emailsReceived || 0) + 1;
-  } else if (type === 'login') {
-    alias.loginsViaAlias = (alias.loginsViaAlias || 0) + 1;
-  }
-
-  // Auto-expire if enabled and used
-  if (alias.autoExpire && alias.usedCount > 0) {
-    alias.status = 'expired';
-    alias.expiresAt = new Date().toISOString();
-  }
-
-  await saveUserData(userId);
-}
-
-export async function recordTrackerBlocked(aliasId: string, count: number = 1): Promise<void> {
-  await initStorage();
-  const userId = await getCurrentUserId();
-  if (!userId) return;
-
-  await loadUserData(userId);
-  const alias = appData.emailAliases.find(a => a.id === aliasId);
-  if (!alias) return;
-
-  alias.trackerDetected = true;
-  alias.trackersBlocked = (alias.trackersBlocked || 0) + count;
-  await saveUserData(userId);
+  data.emailAliases.push(alias);
+  await persist();
+  return alias;
 }
 
 export async function getAllEmailAliases(): Promise<EmailAlias[]> {
-  await initStorage();
-  const userId = await getCurrentUserId();
-  if (!userId) return [];
-
-  await loadUserData(userId);
-
-  // Check expiration
-  const now = new Date();
-  let updated = false;
-  appData.emailAliases.forEach(alias => {
-    if (alias.expiresAt && new Date(alias.expiresAt) < now && alias.status === 'active') {
-      alias.status = 'expired';
-      updated = true;
+  if (!session) return [];
+  const now = Date.now();
+  let changed = false;
+  data.emailAliases.forEach((a) => {
+    if (a.status === 'active' && a.expiresAt && new Date(a.expiresAt).getTime() < now) {
+      a.status = 'expired';
+      changed = true;
     }
   });
-  
-  if (updated) {
-    await saveUserData(userId);
+  if (changed) await persist();
+  return [...data.emailAliases].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function getEmailAlias(id: string): Promise<EmailAlias | null> {
+  return data.emailAliases.find((a) => a.id === id) ?? null;
+}
+
+export async function updateEmailAliasStatus(id: string, status: 'active' | 'inactive'): Promise<void> {
+  requireSession();
+  const a = data.emailAliases.find((x) => x.id === id);
+  if (!a) return;
+  a.status = status;
+  await persist();
+}
+
+export async function deleteEmailAlias(id: string): Promise<void> {
+  requireSession();
+  data.emailAliases = data.emailAliases.filter((a) => a.id !== id);
+  await persist();
+}
+
+export async function recordEmailAliasUsage(id: string, type: 'email' | 'login'): Promise<void> {
+  if (!session) return;
+  const a = data.emailAliases.find((x) => x.id === id);
+  if (!a) return;
+  a.usedCount = (a.usedCount ?? 0) + 1;
+  a.lastUsedAt = new Date().toISOString();
+  if (type === 'email') a.emailsReceived = (a.emailsReceived ?? 0) + 1;
+  else a.loginsViaAlias = (a.loginsViaAlias ?? 0) + 1;
+  if (a.autoExpire) {
+    a.status = 'expired';
+    a.expiresAt = new Date().toISOString();
   }
-
-  return appData.emailAliases;
+  await persist();
 }
 
-export async function updateEmailAliasStatus(
-  aliasId: string,
-  status: 'active' | 'inactive'
-): Promise<void> {
-  await initStorage();
-  const userId = await getCurrentUserId();
-  if (!userId) throw new Error('User not logged in');
-
-  await loadUserData(userId);
-  const index = appData.emailAliases.findIndex(a => a.id === aliasId);
-  if (index !== -1) {
-    appData.emailAliases[index].status = status;
-    await saveUserData(userId);
-  }
+export async function recordTrackerBlocked(id: string, count = 1): Promise<void> {
+  if (!session) return;
+  const a = data.emailAliases.find((x) => x.id === id);
+  if (!a) return;
+  a.trackerDetected = true;
+  a.trackersBlocked = (a.trackersBlocked ?? 0) + count;
+  await persist();
 }
 
-export async function deleteEmailAlias(aliasId: string): Promise<void> {
-  await initStorage();
-  const userId = await getCurrentUserId();
-  if (!userId) throw new Error('User not logged in');
+/* ---------------- export ---------------- */
 
-  await loadUserData(userId);
-  appData.emailAliases = appData.emailAliases.filter(a => a.id !== aliasId);
-  await saveUserData(userId);
-}
-
-/**
- * Logout and cleanup
- */
-export async function logout(): Promise<void> {
-  try {
-    // Clear current user session from AsyncStorage
-    // This logs out the user but keeps their data files intact
-    await AsyncStorage.removeItem(USER_KEY);
-    
-    // Clear in-memory data (user data files remain on disk)
-    appData.passwords = [];
-    appData.mfaApprovals = [];
-    appData.emailAliases = [];
-  
-    console.log('User logged out. User data files are preserved for next login.');
-  } catch (error) {
-    console.error('Error during logout:', error);
-    // Don't throw - allow logout to complete even if there's an error
-  }
-}
-
-/**
- * Theme Management
- */
-export interface Theme {
-  name: string;
-  primary: string;
-  secondary: string;
-  background: string;
-  surface: string;
-  text: string;
-  textSecondary: string;
-  accent: string;
-  error: string;
-  success: string;
-}
-
-export const defaultThemes: Theme[] = [
-  {
-    name: 'Default Blue',
-    primary: '#6366f1',
-    secondary: '#8b5cf6',
-    background: '#ffffff',
-    surface: '#f9fafb',
-    text: '#111827',
-    textSecondary: '#6b7280',
-    accent: '#10b981',
-    error: '#ef4444',
-    success: '#22c55e',
-  },
-  {
-    name: 'Dark Mode',
-    primary: '#818cf8',
-    secondary: '#a78bfa',
-    background: '#1f2937',
-    surface: '#374151',
-    text: '#f9fafb',
-    textSecondary: '#d1d5db',
-    accent: '#34d399',
-    error: '#f87171',
-    success: '#4ade80',
-  },
-  {
-    name: 'Purple',
-    primary: '#a855f7',
-    secondary: '#c084fc',
-    background: '#ffffff',
-    surface: '#faf5ff',
-    text: '#111827',
-    textSecondary: '#6b7280',
-    accent: '#ec4899',
-    error: '#ef4444',
-    success: '#22c55e',
-  },
-  {
-    name: 'Green',
-    primary: '#10b981',
-    secondary: '#34d399',
-    background: '#ffffff',
-    surface: '#f0fdf4',
-    text: '#111827',
-    textSecondary: '#6b7280',
-    accent: '#059669',
-    error: '#ef4444',
-    success: '#22c55e',
-  },
-];
-
-export async function getTheme(): Promise<Theme> {
-  try {
-    const userId = await getCurrentUserId();
-    const themeKey = userId ? `${THEME_KEY}_${userId}` : THEME_KEY;
-    const themeStr = await AsyncStorage.getItem(themeKey);
-    if (themeStr) {
-      return JSON.parse(themeStr);
-    }
-  } catch (error) {
-    console.error('Error loading theme:', error);
-  }
-  return defaultThemes[0];
-}
-
-export async function setTheme(theme: Theme): Promise<void> {
-  const userId = await getCurrentUserId();
-  const themeKey = userId ? `${THEME_KEY}_${userId}` : THEME_KEY;
-  await AsyncStorage.setItem(themeKey, JSON.stringify(theme));
+/** Plain export of the decrypted vault (the caller must warn the user). */
+export function exportVaultSnapshot(): { passwords: PasswordEntry[]; emailAliases: EmailAlias[]; exportedAt: string } {
+  requireSession();
+  return { passwords: data.passwords, emailAliases: data.emailAliases, exportedAt: new Date().toISOString() };
 }

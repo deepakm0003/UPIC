@@ -372,5 +372,14 @@ All core features implemented. Ready for:
 
 **Built with**: Node.js, TypeScript, Express, Prisma, PostgreSQL, Redis, BullMQ, React Native, Expo, EAS Build
 
+**Built by**: Group 17, Usable Security and Privacy (USS) Project
+- Deepak Meena (2023188)
+- Vaibhav Sorot (2023573)
+- Kartik Haritwal (2023275)
+- Aishwary Singh Panwar (2023055)
+- Yuvraj Rajput (2023616)
+
+**Supervisor**: Prof. Arun Balaji
+
 
 

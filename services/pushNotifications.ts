@@ -16,6 +16,8 @@ Notifications.setNotificationHandler({
     shouldShowAlert: true,
     shouldPlaySound: true,
     shouldSetBadge: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
   }),
 });
 
@@ -158,7 +160,7 @@ export async function scheduleLocalNotification(
       content: {
         title,
         body,
-        data,
+        data: data as unknown as Record<string, unknown>,
         sound: true,
         priority: Notifications.AndroidNotificationPriority.HIGH,
       },

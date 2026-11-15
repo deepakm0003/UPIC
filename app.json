@@ -1,14 +1,15 @@
 {
   "expo": {
-    "name": "Unified Authentication Manager",
+    "name": "UPIC",
     "slug": "unified-auth-manager",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "splash": {
+      "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#6366f1"
+      "backgroundColor": "#FFFFFF"
     },
     "assetBundlePatterns": [
       "**/*"
@@ -17,33 +18,23 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.unifiedauth.manager",
       "infoPlist": {
-        "NSFaceIDUsageDescription": "Allow Unified Authentication Manager to use Face ID to securely access your vault."
+        "NSFaceIDUsageDescription": "Allow UPIC to use Face ID to unlock your encrypted vault."
       },
       "buildNumber": "1.0.0"
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#6366f1",
-        "foregroundImage": "./assets/icon.png"
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#2E7BFF"
       },
       "package": "com.unifiedauth.manager",
       "versionCode": 1,
       "permissions": [
         "USE_BIOMETRIC",
-        "USE_FINGERPRINT",
         "RECEIVE_BOOT_COMPLETED",
         "VIBRATE",
         "INTERNET",
-        "ACCESS_NETWORK_STATE",
-        "BIND_AUTOFILL_SERVICE",
-        "BIND_ACCESSIBILITY_SERVICE"
-      ],
-      "googleServicesFile": "./google-services.json",
-      "intentFilters": [
-        {
-          "action": "android.service.autofill.AutofillService",
-          "category": ["android.intent.category.DEFAULT"]
-        }
+        "ACCESS_NETWORK_STATE"
       ]
     },
     "web": {
@@ -53,23 +44,18 @@
       [
         "expo-local-authentication",
         {
-          "faceIDPermission": "Allow Unified Authentication Manager to use Face ID."
+          "faceIDPermission": "Allow UPIC to use Face ID to unlock your encrypted vault."
         }
       ],
       [
         "expo-notifications",
         {
           "icon": "./assets/notification-icon.png",
-          "color": "#6366f1",
-          "sounds": ["./assets/notification-sound.wav"]
+          "color": "#2E7BFF"
         }
       ]
     ],
     "sdkVersion": "54.0.0",
-    "extra": {
-      "eas": {
-        "projectId": "unified-auth-manager"
-      }
-    }
+    "extra": {}
   }
 }

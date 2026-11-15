@@ -1,6 +1,9 @@
 /**
- * Password generator utility with configurable options
+ * Password generator. Uses the platform CSPRNG (never Math.random) and
+ * guarantees at least one character from every selected group.
  */
+import { randomInt } from '../services/crypto';
+import { assessPassword } from './passwordStrength';
 
 export interface PasswordOptions {
   length: number;
@@ -8,139 +11,56 @@ export interface PasswordOptions {
   includeLowercase: boolean;
   includeNumbers: boolean;
   includeSymbols: boolean;
+  /** Leave out characters that are easy to confuse (0/O, 1/l/I). */
+  avoidAmbiguous?: boolean;
 }
 
 const UPPERCASE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const LOWERCASE = 'abcdefghijklmnopqrstuvwxyz';
 const NUMBERS = '0123456789';
-const SYMBOLS = '!@#$%^&*()_+-=[]{}|;:,.<>?';
+const SYMBOLS = '!@#$%^&*()-_=+[]{};:,.?';
+const AMBIGUOUS = /[0O1lI]/g;
 
-/**
- * Generates a random password based on options
- */
 export function generatePassword(options: PasswordOptions): string {
-  const {
-    length,
-    includeUppercase,
-    includeLowercase,
-    includeNumbers,
-    includeSymbols,
-  } = options;
+  const groups: string[] = [];
+  if (options.includeUppercase) groups.push(UPPERCASE);
+  if (options.includeLowercase) groups.push(LOWERCASE);
+  if (options.includeNumbers) groups.push(NUMBERS);
+  if (options.includeSymbols) groups.push(SYMBOLS);
+  if (groups.length === 0) groups.push(LOWERCASE, UPPERCASE, NUMBERS);
 
-  // Build character set based on options
-  let charset = '';
-  if (includeUppercase) charset += UPPERCASE;
-  if (includeLowercase) charset += LOWERCASE;
-  if (includeNumbers) charset += NUMBERS;
-  if (includeSymbols) charset += SYMBOLS;
+  const sets = options.avoidAmbiguous ? groups.map((g) => g.replace(AMBIGUOUS, '')) : groups;
+  const all = sets.join('');
+  const length = Math.max(options.length, sets.length);
 
-  // Ensure at least one character type is selected
-  if (charset.length === 0) {
-    charset = LOWERCASE + UPPERCASE + NUMBERS;
-  }
+  const chars: string[] = sets.map((s) => s[randomInt(s.length)]);
+  while (chars.length < length) chars.push(all[randomInt(all.length)]);
 
-  // Generate password
-  let password = '';
-  const charsetLength = charset.length;
-
-  // Ensure at least one character from each selected type
-  if (includeUppercase && password.indexOf(UPPERCASE[0]) === -1) {
-    password += UPPERCASE[Math.floor(Math.random() * UPPERCASE.length)];
+  // Fisher–Yates shuffle with the secure RNG.
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
   }
-  if (includeLowercase && password.indexOf(LOWERCASE[0]) === -1) {
-    password += LOWERCASE[Math.floor(Math.random() * LOWERCASE.length)];
-  }
-  if (includeNumbers && password.indexOf(NUMBERS[0]) === -1) {
-    password += NUMBERS[Math.floor(Math.random() * NUMBERS.length)];
-  }
-  if (includeSymbols && password.indexOf(SYMBOLS[0]) === -1) {
-    password += SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
-  }
-
-  // Fill the rest randomly
-  while (password.length < length) {
-    password += charset[Math.floor(Math.random() * charsetLength)];
-  }
-
-  // Shuffle the password to randomize character positions
-  return shuffleString(password);
+  return chars.join('');
 }
 
-/**
- * Shuffles a string to randomize character order
- */
-function shuffleString(str: string): string {
-  const arr = str.split('');
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr.join('');
-}
-
-/**
- * Calculates password strength based on various factors
- */
+/** Kept for older call sites; prefer assessPassword(). */
 export function calculatePasswordStrength(password: string): {
-  score: number; // 0-100
+  score: number;
   strength: 'weak' | 'fair' | 'good' | 'strong' | 'very-strong';
   color: string;
 } {
-  let score = 0;
-
-  // Length factor
-  if (password.length >= 8) score += 10;
-  if (password.length >= 12) score += 10;
-  if (password.length >= 16) score += 10;
-  if (password.length >= 20) score += 10;
-
-  // Character variety
-  if (/[a-z]/.test(password)) score += 10;
-  if (/[A-Z]/.test(password)) score += 10;
-  if (/[0-9]/.test(password)) score += 10;
-  if (/[^a-zA-Z0-9]/.test(password)) score += 10;
-
-  // Patterns and complexity
-  if (password.length > 12 && /[a-z]/.test(password) && /[A-Z]/.test(password)) score += 10;
-  if (password.length > 12 && /[0-9]/.test(password) && /[^a-zA-Z0-9]/.test(password)) score += 10;
-
-  // Penalties for common patterns
-  if (/(.)\1{2,}/.test(password)) score -= 10; // Repeated characters
-  if (/123|abc|qwe/i.test(password)) score -= 5; // Sequential patterns
-
-  score = Math.max(0, Math.min(100, score));
-
-  let strength: 'weak' | 'fair' | 'good' | 'strong' | 'very-strong';
-  let color: string;
-
-  if (score < 30) {
-    strength = 'weak';
-    color = '#ef4444'; // red
-  } else if (score < 50) {
-    strength = 'fair';
-    color = '#f59e0b'; // orange
-  } else if (score < 70) {
-    strength = 'good';
-    color = '#eab308'; // yellow
-  } else if (score < 90) {
-    strength = 'strong';
-    color = '#22c55e'; // green
-  } else {
-    strength = 'very-strong';
-    color = '#10b981'; // emerald
-  }
-
-  return { score, strength, color };
+  const r = assessPassword(password);
+  const map = ['weak', 'weak', 'fair', 'strong', 'very-strong'] as const;
+  const colors = ['#ef4444', '#ef4444', '#f59e0b', '#22c55e', '#10b981'];
+  return { score: r.score, strength: map[r.level], color: colors[r.level] };
 }
 
-/**
- * Default password options
- */
 export const defaultPasswordOptions: PasswordOptions = {
-  length: 16,
+  length: 20,
   includeUppercase: true,
   includeLowercase: true,
   includeNumbers: true,
-  includeSymbols: false,
+  includeSymbols: true,
+  avoidAmbiguous: true,
 };
-

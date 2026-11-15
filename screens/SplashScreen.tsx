@@ -1,106 +1,26 @@
-import React, { useEffect } from 'react';
-import { View, StyleSheet, Image } from 'react-native';
-import { ActivityIndicator } from 'react-native-paper';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { initStorage, getCurrentUser, isOnboardingCompleted } from '../services/fileStorage';
+import React from 'react';
+import { StyleSheet, View } from 'react-native';
+import { AuroraBackground, AppText, FadeIn } from '../components/ui';
+import { AnimatedLogo } from '../components/brand/Logo';
+import { useTheme } from '../contexts/ThemeContext';
 
-const ONBOARDING_COMPLETED_KEY = '@onboarding_completed';
-
-interface SplashScreenProps {
-  navigation: any;
-}
-
-export const SplashScreen: React.FC<SplashScreenProps> = ({ navigation }) => {
-  useEffect(() => {
-    const initializeApp = async () => {
-      try {
-        // Initialize storage
-        await initStorage();
-
-        // Check if user is logged in
-        const user = await getCurrentUser();
-        
-        if (user) {
-          // User exists - load their data
-          try {
-            const { loadUserData } = await import('../services/fileStorage');
-            await loadUserData(user.id);
-            console.log('User data loaded in splash screen for:', user.username);
-          } catch (error) {
-            console.error('Error loading user data in splash:', error);
-            // Continue anyway - user might not have data yet
-          }
-          
-          // User exists, check onboarding status for this user
-          const onboardingCompleted = await isOnboardingCompleted();
-          if (!onboardingCompleted) {
-            // Shouldn't happen if signup worked correctly
-            navigation.replace('Onboarding');
-          } else {
-            // Go to main app (AuthGuard will prompt for master password if needed)
-            navigation.replace('Main');
-          }
-        } else {
-          // No user exists - check if onboarding was shown before
-          const onboardingShown = await AsyncStorage.getItem(ONBOARDING_COMPLETED_KEY);
-          if (onboardingShown === 'true') {
-            // Onboarding already shown, go to auth
-            navigation.replace('Auth');
-          } else {
-            // First time - show onboarding
-            navigation.replace('Onboarding');
-          }
-        }
-      } catch (error) {
-        console.error('Initialization error:', error);
-        navigation.replace('Auth');
-      }
-    };
-
-    // Small delay for splash screen
-    const timer = setTimeout(initializeApp, 1500);
-    return () => clearTimeout(timer);
-  }, [navigation]);
-
+/** Shown while UPIC checks for an account on this device. */
+export const SplashScreen: React.FC = () => {
+  const { theme } = useTheme();
   return (
-    <View style={styles.container}>
-      <View style={styles.iconContainer}>
-        <View style={styles.shield}>
-          <View style={styles.shieldInner} />
-        </View>
-      </View>
-      <ActivityIndicator size="large" color="#6366f1" style={styles.loader} />
+    <View style={styles.root}>
+      <AuroraBackground intensity={1.2} />
+      <AnimatedLogo size={104} />
+      <FadeIn delay={200} style={{ alignItems: 'center', marginTop: 28, gap: 6 }}>
+        <AppText variant="h1">UPIC</AppText>
+        <AppText variant="label" color={theme.textSecondary}>
+          Universal Password and Identity Custodian
+        </AppText>
+      </FadeIn>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#ffffff',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  iconContainer: {
-    marginBottom: 32,
-  },
-  shield: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: '#6366f1',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  shieldInner: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    backgroundColor: 'white',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  loader: {
-    marginTop: 20,
-  },
+  root: { flex: 1, alignItems: 'center', justifyContent: 'center' },
 });

@@ -19,7 +19,12 @@
     "submit:ios": "eas submit --platform ios"
   },
   "dependencies": {
+    "@expo-google-fonts/inter": "^0.4.2",
+    "@expo-google-fonts/space-grotesk": "^0.4.1",
+    "@expo/metro-runtime": "~6.1.2",
     "@expo/vector-icons": "^15.0.3",
+    "@noble/ciphers": "^1.0.0",
+    "@noble/hashes": "^1.5.0",
     "@react-native-async-storage/async-storage": "^2.2.0",
     "@react-navigation/bottom-tabs": "^6.6.1",
     "@react-navigation/native": "^6.1.18",
@@ -44,6 +49,7 @@
     "react-native-paper": "^5.12.5",
     "react-native-safe-area-context": "~5.6.0",
     "react-native-screens": "~4.16.0",
+    "react-native-svg": "15.12.1",
     "react-native-vector-icons": "^10.2.0",
     "react-native-web": "^0.21.0",
     "tweetnacl": "^1.0.3"
@@ -54,5 +60,13 @@
     "babel-preset-expo": "~11.0.0",
     "typescript": "^5.1.3"
   },
-  "private": true
+  "private": true,
+  "author": "Group 17 - Usable Security and Privacy Project",
+  "contributors": [
+    "Deepak Meena (2023188)",
+    "Vaibhav Sorot (2023573)",
+    "Kartik Haritwal (2023275)",
+    "Aishwary Singh Panwar (2023055)",
+    "Yuvraj Rajput (2023616)"
+  ]
 }

@@ -1,11 +1,24 @@
+export interface KdfParams {
+  alg: 'PBKDF2-SHA256';
+  salt: string; // base64
+  iterations: number;
+}
+
 export interface User {
   id: string;
   username: string;
   email: string;
-  accountPasswordHash: string; // Password for login
-  masterPasswordHash?: string; // Optional: Separate master password for vault encryption
+  /** Salted PBKDF2 hash of the account password ("pbkdf2$…"); legacy accounts may still hold a bare SHA-256 hex. */
+  accountPasswordHash: string;
+  /** Verifier derived from the master key ("v2:…"); never the master password itself. */
+  masterPasswordHash?: string;
+  kdf?: KdfParams;
   biometricEnabled: boolean;
   createdAt: string;
+  recoveryEmail?: string;
+  recoveryPhone?: string;
+  hasRecoveryKey?: boolean;
+  recoveryKeyCreatedAt?: string;
 }
 
 export interface PasswordEntry {
@@ -22,19 +35,27 @@ export interface PasswordEntry {
   isShared?: boolean;
   sharedWith?: string[];
   isBreached?: boolean;
-  iconUrl?: string; // Website favicon/icon URL
+  iconUrl?: string;
+  /** Pinned to the top of the vault (heart). */
+  favorite?: boolean;
 }
+
+export type MFAStatus = 'pending' | 'approved' | 'denied' | 'expired';
 
 export interface MFAApproval {
   id: string;
   service: string;
   location: string;
   timestamp: string;
-  status: 'pending' | 'approved' | 'denied';
+  status: MFAStatus;
   deviceInfo?: string;
   ipAddress?: string;
   userAgent?: string;
-  aliasUsed?: string; // Email alias used for this login
+  aliasUsed?: string;
+  /** False when the request comes from a device the user has never approved before. */
+  recognizedDevice?: boolean;
+  respondedAt?: string;
+  expiresAt?: string;
 }
 
 export interface EmailAlias {
@@ -43,67 +64,22 @@ export interface EmailAlias {
   status: 'active' | 'inactive' | 'expired';
   createdAt: string;
   expiresAt?: string;
-  // Enhanced features
-  autoExpire?: boolean; // Auto-expire after first use
-  usedCount?: number; // Number of times alias has been used
-  lastUsedAt?: string; // Last time alias received an email
-  replyMasking?: boolean; // Enable reply masking
-  replyMaskingEnabled?: boolean; // Is reply masking enabled
-  emailsReceived?: number; // Total emails received
-  loginsViaAlias?: number; // Number of logins using this alias
-  trackerDetected?: boolean; // Whether marketing trackers were detected
-  trackersBlocked?: number; // Number of trackers blocked
+  /** Friendly name shown in the app, e.g. "Shopping account". */
+  label?: string;
+  /** Which website this temporary email was made for. */
+  website?: string;
+  /** Real address that messages are forwarded to. */
+  forwardTo?: string;
+  autoExpire?: boolean;
+  usedCount?: number;
+  lastUsedAt?: string;
+  replyMasking?: boolean;
+  replyMaskingEnabled?: boolean;
+  emailsReceived?: number;
+  loginsViaAlias?: number;
+  trackerDetected?: boolean;
+  trackersBlocked?: number;
 }
-
-export interface OnboardingSlide {
-  id: string;
-  title: string;
-  description: string;
-  icon: string;
-}
-
-export type RootStackParamList = {
-  Splash: undefined;
-  Onboarding: { fromLogin?: boolean } | undefined;
-  Auth: undefined;
-  Main: undefined;
-};
-
-export type AuthStackParamList = {
-  Welcome: undefined;
-  Login: undefined;
-  SignUp: undefined;
-  MasterPasswordSetup: { username: string; email: string; isFirstTime?: boolean };
-  BiometricSetup: { username: string; email: string };
-  ForgotUsername: undefined;
-  ForgotPassword: undefined;
-  Onboarding: { fromLogin?: boolean } | undefined;
-};
-
-export type MainTabParamList = {
-  Passwords: undefined;
-  Generate: undefined;
-  MFA: undefined;
-  EmailRelay: undefined;
-  Settings: undefined;
-};
-
-export type PasswordStackParamList = {
-  PasswordList: undefined;
-  PasswordDetails: { passwordId?: string };
-  AddPassword: undefined;
-  PasswordShare: { passwordEntry: PasswordEntry };
-};
-
-export type MFAScreenParamList = {
-  MFAApproval: undefined;
-  MFAHistory: undefined;
-};
-
-export type EmailRelayStackParamList = {
-  EmailAliasList: undefined;
-  CreateAlias: undefined;
-};
 
 export interface SecurityEvent {
   id: string;
@@ -129,5 +105,48 @@ export interface PrivacyMetrics {
 export interface DashboardData {
   metrics: PrivacyMetrics;
   events: SecurityEvent[];
-  recentEvents: SecurityEvent[]; // Last 10 events
+  recentEvents: SecurityEvent[];
 }
+
+/* ---------------- Navigation ---------------- */
+
+export type AuthStackParamList = {
+  Welcome: undefined;
+  Login: undefined;
+  SignUp: undefined;
+  MasterPasswordSetup: undefined;
+  RecoveryKey: { recoveryKey: string; mode: 'setup' | 'rotated' };
+  BiometricSetup: undefined;
+  HowUPICProtects: { onboarding?: boolean } | undefined;
+  ForgotMasterPassword: { identifier?: string } | undefined;
+  ForgotUsername: undefined;
+};
+
+export type MainTabParamList = {
+  Home: undefined;
+  Passwords: undefined;
+  MFA: undefined;
+  Relay: undefined;
+  Settings: undefined;
+};
+
+export type MainStackParamList = {
+  Tabs: undefined;
+  Walkthrough: undefined;
+  PasswordDetails: { passwordId: string };
+  PasswordEdit: { passwordId?: string; generated?: string; focusFix?: boolean } | undefined;
+  PasswordGenerator: { returnTo?: 'PasswordEdit'; passwordId?: string } | undefined;
+  PasswordHealth: undefined;
+  ImportExport: undefined;
+  MFAHistory: undefined;
+  RelayIntro: undefined;
+  CreateAlias: undefined;
+  AliasDetails: { aliasId: string };
+  PrivacyDashboard: undefined;
+  HowUPICProtects: { onboarding?: boolean } | undefined;
+  RecoverySettings: undefined;
+  RecoveryKey: { recoveryKey: string; mode: 'setup' | 'rotated' };
+  ChangeMasterPassword: undefined;
+  Appearance: undefined;
+  About: undefined;
+};

@@ -1,188 +1,97 @@
-# Unified Authentication Manager
+# UPIC — Universal Password and Identity Custodian
 
-A production-ready Expo React Native app for secure password management, multi-factor authentication, and email relay services.
+A mobile app (Expo / React Native) that combines a **password vault**, **one-tap MFA approval** and a **private email relay** in one place. It's built from the findings of our Phase 1 user study for the *Usable Security and Privacy* course.
 
-## Features
+## Team
 
-### 🔐 Secure Authentication
-- Master password-based authentication
-- Biometric authentication (Fingerprint/Face ID) via Expo Local Authentication
-- AES-256 encryption for stored data (local database)
-- Zero-knowledge model - data never leaves the device
+**Group 17**, Usable Security and Privacy (USS) Project
 
-### 🔑 Password Manager
-- Add, edit, and delete credentials
-- View saved passwords with last-used timestamps
-- Generate strong passwords with configurable options
-- Password strength indicator (color-coded)
-- Search functionality
+| Name | Roll No. |
+|------|----------|
+| Deepak Meena | 2023188 |
+| Vaibhav Sorot | 2023573 |
+| Kartik Haritwal | 2023275 |
+| Aishwary Singh Panwar | 2023055 |
+| Yuvraj Rajput | 2023616 |
 
-### 🛡️ Multi-Factor Authentication (MFA)
-- View pending MFA approvals
-- Approve or deny login attempts
-- View MFA history
-- Simulated login attempts for demo purposes
+**Supervisor:** Prof. Arun Balaji
 
-### 📧 Email Relay
-- Create temporary email aliases
-- Manage alias status (active/inactive)
-- View alias list with creation and expiration dates
-- Copy aliases to clipboard
+## Screens (from the Phase 1 lo-fi design)
 
-### 🎓 User Guidance
-- Onboarding tutorial (4 slides)
-- Contextual tooltips for features
-- Helpful descriptions throughout the app
+| Area | Screens |
+|------|---------|
+| Onboarding & access | Welcome, Create account, Master password, Recovery key, Biometric setup, Log in, Unlock, Forgot master password, Forgot username, Walkthrough |
+| Passwords | Home (security overview), My vault, Password details, Add / edit password, Generator, Password health, Import & export |
+| MFA | Login requests (approve / deny), MFA history |
+| Email relay | Intro, Temporary emails dashboard, Create temporary email, Temporary email details |
+| Privacy & settings | Privacy dashboard, How UPIC protects you, Settings, Recovery, Change master password, Appearance, About, Log-out confirmation |
 
-## Technical Stack
+## How the study findings shaped the app
 
-- **Expo SDK 54.0.0** ✅ Compatible with Expo Go 54.0.0
-- **React Native 0.76.5**
-- **React 18.3.1**
-- **TypeScript**
-- **React Navigation** (Stack & Bottom Tabs)
-- **React Native Paper** (UI Components)
-- **Expo Secure Store** (Encrypted local storage)
-- **Expo SQLite** (Local database)
-- **Expo Local Authentication** (Biometrics)
-- **Expo Crypto** (Encryption utilities)
+| Finding (Phase 1) | What UPIC does |
+|---|---|
+| Security score was unclear and differed between screens | One score, computed in one place, with a "What is this score based on?" breakdown |
+| Password health should explain and fix | Each issue shows its reason, sorted by severity, with a **Fix** button that generates a new password |
+| Fear of losing access / forgotten master password | Recovery key (any device) plus email/phone recovery on a trusted device |
+| Master password after the account password was confusing | Explained once at setup; afterwards unlock with the master password **or** biometrics only |
+| "Alias" was not understood | Called **temporary email** everywhere, with an intro screen and the website each address belongs to |
+| Accidental MFA approval | Approve and Deny are the same size; new devices need biometrics or press-and-hold |
+| Text too small, missing badges | Larger base text and a text-size setting; badge for pending MFA requests; visible MFA history |
+| Users want to know what is stored | Privacy dashboard ("What UPIC stores") and a "How UPIC protects you" explainer |
+| Would start with a few low-risk accounts | CSV import from browsers and password managers, plus export |
+| Automatic locking rated important | Auto-lock after inactivity (Immediately / 1 / 5 / 15 min) and lock when the app goes to the background |
 
-## Project Structure
+## Security
 
-```
-├── assets/                 # App icons and images
-├── components/             # Reusable UI components
-│   ├── PasswordEntryItem.tsx
-│   ├── PasswordStrengthIndicator.tsx
-│   └── Tooltip.tsx
-├── navigation/             # Navigation configuration
-│   └── index.tsx
-├── screens/                # App screens
-│   ├── SplashScreen.tsx
-│   ├── OnboardingScreen.tsx
-│   ├── WelcomeScreen.tsx
-│   ├── LoginScreen.tsx
-│   ├── SignUpScreen.tsx
-│   ├── BiometricSetupScreen.tsx
-│   ├── PasswordListScreen.tsx
-│   ├── PasswordDetailsScreen.tsx
-│   ├── PasswordGeneratorScreen.tsx
-│   ├── MFAApprovalScreen.tsx
-│   ├── MFAHistoryScreen.tsx
-│   ├── EmailRelayScreen.tsx
-│   └── SettingsScreen.tsx
-├── services/               # Business logic and API services
-│   ├── auth.ts            # Biometric authentication
-│   ├── encryption.ts      # AES-256 encryption
-│   └── storage.ts         # Database and storage operations
-├── types/                  # TypeScript type definitions
-│   └── index.ts
-├── utils/                  # Utility functions
-│   ├── passwordGenerator.ts
-│   └── validators.ts
-├── App.tsx                 # App entry point
-└── package.json
-```
+- **Vault encryption:** AES-256-GCM (authenticated) via `@noble/ciphers`, with a fresh random IV on every save.
+- **Key derivation:** PBKDF2-HMAC-SHA256 (75,000 rounds, random salt per user) via `@noble/hashes`.
+- **Key wrapping:** a random 256-bit data key encrypts the vault. That key is wrapped separately by the master password, by the recovery key, and optionally by a device-only escrow key kept in the Keychain / Keystore.
+- **Zero-knowledge:** everything is encrypted on the device; nothing is uploaded in this version.
+- **Biometric unlock:** the data key is released from secure hardware after a biometric check. The master password itself is never stored.
+- Salted PBKDF2 hashes for account passwords; constant-time comparisons; back-off after repeated wrong master passwords.
+- Copied passwords are cleared from the clipboard after 30 seconds. No third-party favicon requests, so nobody learns which sites you use.
+- Older vaults (from the previous version) are migrated automatically on first unlock.
 
-## Installation
+## Design
 
-1. **Important**: Make sure you have Expo Go 54.0.0 installed on your device.
+- Onboarding and sign-in screens use white backgrounds, bold black type and doodle illustrations.
+- The main app uses a black background with colour-pop cards.
+- Every saved website gets its own brand colour (for example Netflix red or Discord blue). The password detail header and Save button use that colour.
+- Light and dark themes, plus Standard / Large / Extra-large text.
 
-2. Install dependencies:
+## Run it
+
 ```bash
 npm install
+npx expo start            # scan the QR code with Expo Go (Android or iOS)
+npx expo start --web      # browser preview
 ```
 
-   If you encounter any issues, try:
-   ```bash
-   rm -rf node_modules package-lock.json
-   npm install
-   npx expo install --fix
-   ```
+## Build an Android APK
 
-3. Create app assets (required):
-   - Create `assets/icon.png` (1024x1024) - App icon
-   - Create `assets/splash.png` (1284x2778) - Splash screen
-   - Create `assets/adaptive-icon.png` (1024x1024) - Android adaptive icon
-   - Create `assets/favicon.png` (48x48) - Web favicon
-
-   Or use Expo's asset generation:
-   ```bash
-   npx expo install @expo/configure-splash-screen
-   ```
-
-4. Start the Expo development server:
 ```bash
-npm start
+npx expo prebuild --platform android
+cd android && ./gradlew assembleRelease
+# APK: android/app/build/outputs/apk/release/app-release.apk
 ```
 
-5. Run on iOS/Android:
-```bash
-npm run ios
-# or
-npm run android
+Or build in the cloud with `eas build --platform android --profile preview` (needs a free Expo account).
+
+## Project structure
+
 ```
-
-6. For web:
-```bash
-npm run web
+App.tsx                 fonts, providers, auto-lock activity tracking
+navigation/             auth / locked / main navigators and the tab bar
+screens/                auth, home, passwords, mfa, relay, privacy, settings, onboarding
+components/ui/          design-system components (Button, TextField, GlassCard, ScoreRing, …)
+components/brand/       logo and illustrations
+contexts/               AuthContext (unlock, auto-lock, biometrics), ThemeContext
+services/               fileStorage (encrypted vault), crypto, securityScore, preferences, …
+theme/tokens.ts         colours, type scale, spacing
+utils/                  password strength, generator, brand colours, CSV import
+backend/                optional Node/Express API (not required by the app)
 ```
-
-## Security Features
-
-### Encryption
-- All passwords are encrypted using AES-256 before storage
-- Master password is hashed using SHA-256
-- Encryption keys are derived using PBKDF2-like key stretching
-- Salt is stored securely using Expo Secure Store
-
-### Data Storage
-- SQLite database for structured data
-- Expo Secure Store for sensitive credentials
-- All data stored locally on device (zero-knowledge architecture)
-
-### Authentication
-- Master password required for all operations
-- Optional biometric authentication for quick access
-- Session management and secure logout
-
-## Development Notes
-
-### MVP Limitations
-- Backend is mocked locally (no real network calls)
-- Master password prompt is simplified for MVP
-- Encryption uses a simplified XOR cipher (production should use proper AES library)
-- MFA approvals are simulated for demo purposes
-
-### Production Considerations
-- Implement proper AES-256 encryption library (e.g., react-native-aes-crypto)
-- Add master password prompt on app start
-- Implement proper backend API integration
-- Add cloud sync functionality
-- Implement proper MFA push notifications
-- Add email relay backend integration
-
-## Screen Flow
-
-1. **Splash Screen** → Checks onboarding status and user authentication
-2. **Onboarding** → Tutorial for new users (4 slides)
-3. **Welcome** → Login or Sign Up options
-4. **Sign Up / Login** → User authentication
-5. **Biometric Setup** → Optional biometric configuration
-6. **Main Dashboard** → Tabs for Passwords, Generate, MFA, Email Relay, Settings
-
-## Testing
-
-The app includes demo data and simulated MFA requests for testing:
-- Create a new account to test signup flow
-- Add passwords to test password manager
-- MFA requests are automatically generated every 30 seconds for demo
-- Email aliases can be created and managed
 
 ## License
 
-Private - All rights reserved
-
-## Version
-
-1.0.0 - MVP Release
+Private — academic project.

@@ -63,6 +63,13 @@
     "mfa",
     "email-relay"
   ],
-  "author": "",
+  "author": "Group 17 - Usable Security and Privacy Project",
+  "contributors": [
+    "Deepak Meena (2023188)",
+    "Vaibhav Sorot (2023573)",
+    "Kartik Haritwal (2023275)",
+    "Aishwary Singh Panwar (2023055)",
+    "Yuvraj Rajput (2023616)"
+  ],
   "license": "ISC"
 }

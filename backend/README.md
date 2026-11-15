@@ -111,6 +111,18 @@ See `openapi.yaml` for complete OpenAPI 3.0 specification. Refer to `docs/ARCHIT
 - Prometheus UI: `http://localhost:9090`
 - Grafana UI: `http://localhost:3000` (default creds `admin/admin`)
 
+## Team
+
+**Group 17**, Usable Security and Privacy (USS) Project
+
+- Deepak Meena (2023188)
+- Vaibhav Sorot (2023573)
+- Kartik Haritwal (2023275)
+- Aishwary Singh Panwar (2023055)
+- Yuvraj Rajput (2023616)
+
+**Supervisor:** Prof. Arun Balaji
+
 ## License
 
 ISC
