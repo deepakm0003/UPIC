@@ -2,7 +2,7 @@
  * Small building blocks: pills, icon tiles, section headers, callouts, empty states.
  */
 import React, { useEffect, useState } from 'react';
-import { StyleSheet, View, ViewStyle, StyleProp } from 'react-native';
+import { Image, StyleSheet, View, ViewStyle, StyleProp } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '../../contexts/ThemeContext';
@@ -45,12 +45,43 @@ export const IconTile: React.FC<{
   gradient?: boolean;
   solid?: boolean;
   inverse?: boolean;
-}> = ({ icon, site, tone = 'neutral', size = 44, gradient, solid, inverse }) => {
+  /** Overrides the brand colour (e.g. the colour read from the website). */
+  color?: string;
+  /** Website logo; shown on a white tile, falls back to the glyph/letter on error. */
+  logoUrl?: string;
+}> = ({ icon, site, tone = 'neutral', size = 44, gradient, solid, inverse, color, logoUrl }) => {
   const { theme } = useTheme();
+  const [logoFailed, setLogoFailed] = useState(false);
   const c = toneColors(theme, tone);
   const s = site !== undefined ? siteIcon(site) : null;
   const glyph = icon ?? s?.glyph;
-  const brand = site !== undefined ? brandColor(site) : null;
+  const brand = color ?? (site !== undefined ? brandColor(site) : null);
+
+  if (logoUrl && !logoFailed && !icon) {
+    return (
+      <View
+        style={{
+          width: size,
+          height: size,
+          borderRadius: size * 0.32,
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: '#FFFFFF',
+          borderWidth: inverse ? 0 : theme.outline,
+          borderColor: theme.isDark ? theme.border : theme.ink,
+          overflow: 'hidden',
+        }}
+      >
+        <Image
+          source={{ uri: logoUrl }}
+          onError={() => setLogoFailed(true)}
+          style={{ width: size * 0.66, height: size * 0.66 }}
+          resizeMode="contain"
+          accessibilityIgnoresInvertColors
+        />
+      </View>
+    );
+  }
 
   let bg: string;
   let fg: string;

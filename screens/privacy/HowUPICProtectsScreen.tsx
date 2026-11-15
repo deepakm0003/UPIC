@@ -78,7 +78,7 @@ const FACTS: { icon: Glyph; title: string; body: string }[] = [
   {
     icon: 'eye-off-outline',
     title: 'No tracking',
-    body: 'UPIC does not fetch website icons or send analytics, so nobody learns which accounts you have.',
+    body: 'No analytics and no third-party logo services. Website colours and logos are requested only from the website you saved (you can switch this off in Settings), so no outside company learns which accounts you have.',
   },
 ];
 

@@ -504,6 +504,11 @@ export async function savePassword(
     updatedAt: existing && existing.password === entry.password ? existing.updatedAt : now,
   } as PasswordEntry;
   if (existing && existing.password !== entry.password) saved.isBreached = false;
+  if (existing && existing.website !== entry.website) {
+    saved.brandColor = undefined;
+    saved.iconUrl = undefined;
+    saved.metaCheckedAt = undefined;
+  }
   data.passwords = existing ? data.passwords.map((p) => (p.id === saved.id ? saved : p)) : [...data.passwords, saved];
   await persist();
   return saved;
@@ -528,6 +533,17 @@ export async function setPasswordFavorite(id: string, favorite: boolean): Promis
   const p = data.passwords.find((x) => x.id === id);
   if (!p) return;
   p.favorite = favorite;
+  await persist();
+}
+
+/** Stores the colour/logo found for a website (kept inside the encrypted vault). */
+export async function setPasswordBranding(id: string, branding: { brandColor?: string; iconUrl?: string }): Promise<void> {
+  if (!session) return;
+  const p = data.passwords.find((x) => x.id === id);
+  if (!p) return;
+  p.brandColor = branding.brandColor;
+  p.iconUrl = branding.iconUrl;
+  p.metaCheckedAt = new Date().toISOString();
   await persist();
 }
 

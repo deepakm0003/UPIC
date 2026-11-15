@@ -112,6 +112,13 @@ export const SettingsScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
       <ListGroup>
         <ListRow left={<IconTile icon="email-fast-outline" size={38} />} title="Temporary emails" subtitle="Manage your private email addresses" onPress={() => navigation.navigate('Tabs', { screen: 'Relay' })} />
         <ListRow left={<IconTile icon="shield-account-outline" size={38} />} title="Privacy dashboard" subtitle="What UPIC stores and why" onPress={() => go('PrivacyDashboard')} />
+        <ToggleRow
+          left={<IconTile icon="palette-swatch-outline" size={38} />}
+          title="Website colours & logos"
+          subtitle="Ask each saved website for its logo and colour. Only that website is contacted — no third-party service."
+          value={prefs.fetchSiteBranding}
+          onValueChange={(v) => updatePrefs({ fetchSiteBranding: v })}
+        />
         <ListRow left={<IconTile icon="shield-lock-outline" size={38} />} title="How UPIC protects you" subtitle="Encryption and who can see what" onPress={() => go('HowUPICProtects')} />
         <ListRow left={<IconTile icon="history" size={38} />} title="MFA history" subtitle="Approved and denied logins" onPress={() => go('MFAHistory')} />
       </ListGroup>

@@ -53,7 +53,10 @@
           "icon": "./assets/notification-icon.png",
           "color": "#2E7BFF"
         }
-      ]
+      ],
+      "expo-secure-store",
+      "expo-sqlite",
+      "expo-font"
     ],
     "sdkVersion": "54.0.0",
     "extra": {}

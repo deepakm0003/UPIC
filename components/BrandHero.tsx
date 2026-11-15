@@ -21,9 +21,10 @@ export const BrandHero: React.FC<{
   subtitle?: string;
   site?: string;
   icon?: Glyph;
+  logoUrl?: string;
   onBack: () => void;
   actions?: HeroAction[];
-}> = ({ color, title, subtitle, site, icon, onBack, actions = [] }) => {
+}> = ({ color, title, subtitle, site, icon, logoUrl, onBack, actions = [] }) => {
   const insets = useSafeAreaInsets();
   const fg = readableOn(color);
   const chip = withAlpha(fg === '#FFFFFF' ? '#FFFFFF' : '#000000', 0.16);
@@ -49,7 +50,7 @@ export const BrandHero: React.FC<{
       </View>
       <View style={styles.body}>
         <View style={styles.tileWrap}>
-          <IconTile site={site} icon={icon} size={64} inverse />
+          <IconTile site={site} icon={icon} size={64} inverse color={color} logoUrl={logoUrl} />
         </View>
         <AppText variant="h1" color={fg} align="center" numberOfLines={2}>
           {title}

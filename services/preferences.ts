@@ -8,12 +8,15 @@ export interface SecurityPrefs {
   confirmNewDevices: boolean;
   /** Reminders about old, weak or reused passwords. */
   passwordReminders: boolean;
+  /** Look up each saved website's colour and logo from the website itself. */
+  fetchSiteBranding: boolean;
 }
 
 export const defaultPrefs: SecurityPrefs = {
   autoLockMinutes: 5,
   confirmNewDevices: true,
   passwordReminders: true,
+  fetchSiteBranding: true,
 };
 
 const key = (userId: string) => `@upic_prefs_${userId}`;

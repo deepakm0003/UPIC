@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import {
@@ -20,7 +20,9 @@ import { computeSecurityReport } from '../../services/securityScore';
 import { setPasswordFavorite, updatePasswordLastUsed } from '../../services/fileStorage';
 import { copySecret } from '../../utils/clipboard';
 import { displaySiteName } from '../../utils/siteIcon';
-import { brandColor, readableOn, withAlpha } from '../../utils/brandColor';
+import { entryColor, readableOn, withAlpha } from '../../utils/brandColor';
+import { ensureBranding } from '../../services/branding';
+import { useAuth } from '../../contexts/AuthContext';
 import type { Tone } from '../../theme/tokens';
 
 type Filter = 'all' | 'recent' | 'favourites' | 'weak' | 'reused';
@@ -29,6 +31,12 @@ export const PasswordListScreen: React.FC<{ navigation: any }> = ({ navigation }
   const { theme } = useTheme();
   const toast = useToast();
   const { passwords, loading } = usePasswords();
+  const { prefs } = useAuth();
+
+  // Look up colours and logos for newly saved websites in the background.
+  useEffect(() => {
+    ensureBranding(passwords, prefs.fetchSiteBranding);
+  }, [passwords, prefs.fetchSiteBranding]);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
 
@@ -69,12 +77,14 @@ export const PasswordListScreen: React.FC<{ navigation: any }> = ({ navigation }
           My vault
         </AppText>
         <IconButton icon="swap-vertical" label="Import or export passwords" onPress={() => navigation.navigate('ImportExport')} />
+        <IconButton icon="dice-multiple-outline" label="Generate a password without saving" onPress={() => navigation.navigate('PasswordGenerator')} />
         <IconButton icon="plus" label="Add password" tone="primary" onPress={() => navigation.navigate('PasswordEdit')} />
       </View>
 
       {passwords.length === 0 && !loading ? (
         <EmptyState icon="key-plus" title="Your vault is empty" body="Add a login, or import a few from your browser.">
           <Button title="Add password" onPress={() => navigation.navigate('PasswordEdit')} />
+          <Button title="Generate a password" variant="secondary" icon="dice-multiple-outline" onPress={() => navigation.navigate('PasswordGenerator')} />
           <Button title="Import passwords" variant="secondary" onPress={() => navigation.navigate('ImportExport')} />
         </EmptyState>
       ) : (
@@ -105,7 +115,7 @@ export const PasswordListScreen: React.FC<{ navigation: any }> = ({ navigation }
               {visible.map((p) => {
                 const site = displaySiteName(p.website);
                 const issue = issueByEntry.get(p.id);
-                const color = brandColor(p.website);
+                const color = entryColor(p);
                 const fg = readableOn(color);
                 return (
                   <PressableScale
@@ -119,7 +129,7 @@ export const PasswordListScreen: React.FC<{ navigation: any }> = ({ navigation }
                     style={[styles.card, { backgroundColor: color, borderColor: theme.isDark ? 'transparent' : theme.ink }]}
                   >
                     <View style={styles.cardTop}>
-                      <IconTile site={p.website} size={42} inverse />
+                      <IconTile site={p.website} size={42} inverse color={color} logoUrl={prefs.fetchSiteBranding ? p.iconUrl : undefined} />
                       <Pressable
                         hitSlop={12}
                         onPress={() => {

@@ -22,7 +22,7 @@ const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
 export const ThemeProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const system = useColorScheme();
-  const [preference, setPreferenceState] = useState<ThemePreference>('dark');
+  const [preference, setPreferenceState] = useState<ThemePreference>('light');
   const [textSize, setTextSizeState] = useState<TextSize>('standard');
 
   useEffect(() => {

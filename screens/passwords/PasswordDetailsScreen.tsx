@@ -22,7 +22,8 @@ import { usePasswords } from '../../hooks/useVault';
 import { computeSecurityReport } from '../../services/securityScore';
 import { deletePassword, setPasswordFavorite, updatePasswordLastUsed } from '../../services/fileStorage';
 import { copySecret, copyText } from '../../utils/clipboard';
-import { brandColor } from '../../utils/brandColor';
+import { entryColor } from '../../utils/brandColor';
+import { useAuth } from '../../contexts/AuthContext';
 import { assessPassword } from '../../utils/passwordStrength';
 import { displaySiteName, timeAgo } from '../../utils/siteIcon';
 import { toneColors } from '../../theme/tokens';
@@ -34,6 +35,7 @@ export const PasswordDetailsScreen: React.FC<{ navigation: any; route: { params:
   const toast = useToast();
   const insets = useSafeAreaInsets();
   const { passwords } = usePasswords();
+  const { prefs } = useAuth();
   const entry = passwords.find((p) => p.id === route.params.passwordId);
   const [revealed, setRevealed] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -61,7 +63,7 @@ export const PasswordDetailsScreen: React.FC<{ navigation: any; route: { params:
   }
 
   const site = displaySiteName(entry.website);
-  const color = brandColor(entry.website);
+  const color = entryColor(entry);
   const url = /^https?:\/\//.test(entry.website) ? entry.website : entry.website.includes('.') ? `https://${entry.website}` : null;
   const strength = assessPassword(entry.password, { username: entry.username, site: entry.website });
   const strengthColor = toneColors(theme, strength.tone).fg;
@@ -105,6 +107,7 @@ export const PasswordDetailsScreen: React.FC<{ navigation: any; route: { params:
         <BrandHero
           color={color}
           site={entry.website}
+          logoUrl={prefs.fetchSiteBranding ? entry.iconUrl : undefined}
           title={site}
           subtitle={entry.website}
           onBack={() => navigation.goBack()}

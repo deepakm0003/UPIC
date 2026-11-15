@@ -15,8 +15,8 @@ export const AppearanceScreen: React.FC = () => {
           value={preference}
           onChange={setPreference}
           options={[
-            { value: 'dark', label: 'Aurora (dark)' },
-            { value: 'light', label: 'Pearl (light)' },
+            { value: 'light', label: 'White' },
+            { value: 'dark', label: 'Black' },
             { value: 'system', label: 'System' },
           ]}
         />

@@ -20,7 +20,7 @@ import { usePasswords } from '../../hooks/useVault';
 import { savePassword } from '../../services/fileStorage';
 import { defaultPasswordOptions, generatePassword } from '../../utils/passwordGenerator';
 import { displaySiteName } from '../../utils/siteIcon';
-import { brandColor } from '../../utils/brandColor';
+import { brandColor, entryColor, knownBrandColor } from '../../utils/brandColor';
 
 const CATEGORIES = ['Social', 'Work', 'Shopping', 'Finance', 'Entertainment', 'Other'];
 
@@ -102,7 +102,13 @@ export const PasswordEditScreen: React.FC<{
             onPress={save}
             loading={saving}
             size="lg"
-            color={website.trim() ? brandColor(website) : undefined}
+            color={
+              !website.trim()
+                ? undefined
+                : existing && existing.website === website
+                  ? entryColor(existing)
+                  : knownBrandColor(website) ?? brandColor(website)
+            }
           />
           <Button
             title="More generator options"

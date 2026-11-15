@@ -34,10 +34,48 @@ const BRANDS: [RegExp, string][] = [
   [/flipkart/, '#2874F0'],
   [/myntra/, '#FF3F6C'],
   [/paytm/, '#00BAF2'],
-  [/hdfc|icici|sbi|axis|bank/, '#004C8F'],
+  [/stackoverflow/, '#F48024'],
+  [/medium\.com/, '#000000'],
+  [/quora/, '#B92B27'],
+  [/pinterest/, '#E60023'],
+  [/snapchat/, '#FFFC00'],
+  [/telegram/, '#26A5E4'],
+  [/zoom\.us/, '#0B5CFF'],
+  [/adobe/, '#FA0F00'],
+  [/canva/, '#00C4CC'],
+  [/duolingo/, '#58CC02'],
+  [/coursera/, '#0056D2'],
+  [/leetcode/, '#FFA116'],
+  [/hackerrank/, '#00EA64'],
+  [/codechef/, '#5B4638'],
+  [/codeforces/, '#1F8ACB'],
+  [/irctc/, '#213D77'],
+  [/phonepe/, '#5F259F'],
+  [/uber/, '#000000'],
+  [/olacabs|ola\./, '#8DB600'],
+  [/booking\.com/, '#003580'],
+  [/wikipedia/, '#333333'],
+  [/yahoo/, '#6001D2'],
+  [/proton/, '#6D4AFF'],
+  [/openai|chatgpt/, '#10A37F'],
+  [/hotstar|jiocinema/, '#1F80E0'],
+  [/primevideo/, '#00A8E1'],
+  [/iiit|\.ac\.in|\.edu/, '#2E3A87'],
+  [/hdfc|icici|sbi|axis|kotak|bank/, '#004C8F'],
 ];
 
 const FALLBACK = ['#2F5BFF', '#FF3B7A', '#7C4DFF', '#00A884', '#FF7A00', '#0091EA', '#E91E63', '#5E35B1'];
+
+/** Colour from the built-in brand list, if the site is a known brand. */
+export function knownBrandColor(site?: string): string | undefined {
+  const name = (site || '').toLowerCase();
+  return BRANDS.find(([re]) => re.test(name))?.[1];
+}
+
+/** Best colour for a saved login: known brand → colour read from the site → stable palette colour. */
+export function entryColor(entry: { website: string; brandColor?: string }): string {
+  return knownBrandColor(entry.website) ?? entry.brandColor ?? brandColor(entry.website);
+}
 
 export function brandColor(site?: string): string {
   const name = (site || '').toLowerCase();

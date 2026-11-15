@@ -38,6 +38,10 @@ export interface PasswordEntry {
   iconUrl?: string;
   /** Pinned to the top of the vault (heart). */
   favorite?: boolean;
+  /** Brand colour read from the website itself (see services/siteMeta.ts). */
+  brandColor?: string;
+  /** When UPIC last looked up this site's colour and logo. */
+  metaCheckedAt?: string;
 }
 
 export type MFAStatus = 'pending' | 'approved' | 'denied' | 'expired';
