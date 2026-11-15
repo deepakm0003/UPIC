@@ -148,7 +148,7 @@ export const PasswordDetailsScreen: React.FC<{ navigation: any; route: { params:
                 {revealed ? entry.password : '••••••••••••'}
               </AppText>
             </Row>
-            <Row icon="shield-half-full" label={`Password strength · cracked ${strength.crackTime === 'centuries' ? 'in centuries' : `in ${strength.crackTime}`}`}>
+            <Row icon="shield-half-full" label={`Password strength · cracked ${strength.crackTime === 'instantly' ? 'instantly' : `in ${strength.crackTime}`}`}>
               <AppText variant="label" weight="bold" color={strengthColor}>
                 {strength.label}
               </AppText>

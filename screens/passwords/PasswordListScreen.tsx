@@ -88,7 +88,7 @@ export const PasswordListScreen: React.FC<{ navigation: any }> = ({ navigation }
                 { value: 'all', label: 'All' },
                 { value: 'recent', label: 'Recent' },
                 { value: 'favourites', label: 'Favourites' },
-                { value: 'weak', label: 'Weak', count: report.counts.weak + report.counts.breached },
+                { value: 'weak', label: 'Weak', count: new Set(report.issues.filter((i) => i.type === 'weak' || i.type === 'breached').map((i) => i.entryId)).size },
                 { value: 'reused', label: 'Reused', count: report.counts.reused },
               ]}
             />
