@@ -12,7 +12,7 @@ const BRANDS: [RegExp, string][] = [
   [/apple|icloud/, '#1D1D1F'],
   [/facebook|meta/, '#1877F2'],
   [/instagram/, '#E1306C'],
-  [/twitter|x\.com/, '#1D9BF0'],
+  [/twitter|(^|[/.])x\.com/, '#1D9BF0'],
   [/linkedin/, '#0A66C2'],
   [/amazon/, '#FF9900'],
   [/netflix/, '#E50914'],

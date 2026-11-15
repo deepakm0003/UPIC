@@ -13,7 +13,7 @@ const BRANDS: [RegExp, Glyph][] = [
   [/apple|icloud/, 'apple'],
   [/facebook|meta/, 'facebook'],
   [/instagram/, 'instagram'],
-  [/twitter|x\.com/, 'twitter'],
+  [/twitter|(^|[/.])x\.com/, 'twitter'],
   [/linkedin/, 'linkedin'],
   [/netflix/, 'netflix'],
   [/spotify/, 'spotify'],
